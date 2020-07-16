@@ -278,7 +278,6 @@ def scatter(data, indices, updates, axis):
     """
     return _make.scatter(data, indices, updates, axis)
 
-
 def scatter_add(data, indices, updates, axis):
     """Update data by adding values in updates at positions defined by indices
 
@@ -302,7 +301,6 @@ def scatter_add(data, indices, updates, axis):
         The computed result.
     """
     return _make.scatter_add(data, indices, updates, axis)
-
 
 def reshape_like(data, shape_like):
     """Reshapes the input array by the size of another array.

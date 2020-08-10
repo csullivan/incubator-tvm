@@ -20,8 +20,8 @@ import onnx
 from onnx import helper, TensorProto, mapping
 import torch
 import torchvision
-import topi
-import topi.testing
+from tvm import topi
+import tvm.topi.testing
 import tvm
 from tvm import te
 from tvm import relay
@@ -615,7 +615,7 @@ def test_isnan():
 def verify_gather_nd(in_shape, indices, dtype):
     x = np.random.uniform(size=in_shape).astype(dtype)
     indices = np.array(indices, dtype="int32")
-    out_np = topi.testing.gather_nd_python(x, indices)
+    out_np = tvm.topi.testing.gather_nd_python(x, indices)
 
     y = helper.make_node("GatherND", ['in', 'indices'], ['out'])
 
@@ -823,7 +823,7 @@ def _test_upsample_nearest():
                          'out'], mode='nearest', scales=[1.0, 1.0, 2.0, 2.0])
 
     in_array = np.random.uniform(size=in_shape).astype(np.float32)
-    out_array = topi.testing.upsampling_python(
+    out_array = tvm.topi.testing.upsampling_python(
         in_array, (scale, scale), "NCHW")
 
     graph = helper.make_graph([y],
@@ -848,7 +848,7 @@ def _test_upsample3d_nearest():
                          'out'], mode='nearest', scales=[1.0, 1.0, 2.0, 2.0, 2.0])
 
     in_array = np.random.uniform(size=in_shape).astype(np.float32)
-    out_array = topi.testing.upsampling3d_python(
+    out_array = tvm.topi.testing.upsampling3d_python(
         in_array, (scale, scale, scale), "NCDHW")
 
     graph = helper.make_graph([y],
@@ -872,7 +872,7 @@ def _test_upsample_bilinear():
                          'out'], mode='linear', scales=[1.0, 1.0, 2.0, 2.0])
 
     in_array = np.random.uniform(size=in_shape).astype(np.float32)
-    out_array = topi.testing.bilinear_resize_python(
+    out_array = tvm.topi.testing.bilinear_resize_python(
         in_array, (3*scale, 3*scale), "NCHW")
 
     graph = helper.make_graph([y],
@@ -896,7 +896,7 @@ def _test_upsample_bilinear_opset9():
     y = helper.make_node("Upsample", ['in', 'scales'], ['out'], mode='linear')
     scales = [1, 1, 2, 2]
     in_array = np.random.uniform(size=in_shape).astype(np.float32)
-    out_array = topi.testing.bilinear_resize_python(
+    out_array = tvm.topi.testing.bilinear_resize_python(
         in_array, (3*scale, 3*scale), "NCHW")
 
     ref_node = helper.make_node('Constant',
@@ -931,7 +931,7 @@ def _test_upsample3d_trilinear():
     y = helper.make_node("Upsample", ['in', 'scales'], ['out'], mode='linear')
     scales = [1.0, 1.0, 2.0, 2.0, 2.0]
     in_array = np.random.uniform(size=in_shape).astype(np.float32)
-    out_array = topi.testing.trilinear_resize3d_python(
+    out_array = tvm.topi.testing.trilinear_resize3d_python(
         in_array, (3*scale, 3*scale, 3*scale), "NCDHW", coordinate_transformation_mode="half_pixel")
 
     ref_array = np.array(scales)
@@ -968,7 +968,7 @@ def _test_softmax(inshape, axis):
     opname = 'Softmax'
     indata = np.random.uniform(size=inshape).astype(np.float32)
     outshape = inshape
-    outdata = topi.testing.softmax_python(indata)
+    outdata = tvm.topi.testing.softmax_python(indata)
     if isinstance(axis, int):
         y = helper.make_node(opname, ['in'], ['out'], axis=axis)
     elif axis is None:
@@ -1705,7 +1705,7 @@ def test_Scale():
 
 def test_LogSoftmax():
     _test_onnx_op_elementwise((1, 4),
-                              topi.testing.log_softmax_python,
+                              tvm.topi.testing.log_softmax_python,
                               {},
                               'float32',
                               'LogSoftmax',
@@ -2374,17 +2374,11 @@ def test_pooling():
                        auto_pad='SAME_UPPER')
 
 
-def verify_mod(x_shape, y_shape, fmod, dtype='float32'):
-    x_np = np.random.uniform(size=x_shape).astype(dtype)
-    y_np = np.random.uniform(size=y_shape).astype(dtype)
+def verify_mod(x_shape, y_shape, fmod, out_shape, dtype='float32'):
+    x_np = np.random.uniform(-100.0, 100.0, x_shape).astype(dtype)
+    y_np = np.random.uniform(-100.0, 100.0, y_shape).astype(dtype)
     y_np = np.where(y_np==0, 1, y_np) #remove 0's to avoid division by zero error
 
-    if fmod:
-        np_out = np.fmod(x_np, y_np)
-    else:
-        np_out = np.mod(x_np, y_np)
-
-    out_shape = np_out.shape
     mod_node = helper.make_node("Mod",
                                 inputs=["x", "y"],
                                 outputs=["z"],
@@ -2401,22 +2395,25 @@ def verify_mod(x_shape, y_shape, fmod, dtype='float32'):
                                                                     onnx_dtype, list(out_shape))])
     model = helper.make_model(graph, producer_name='mod_test')
 
+    onnx_out = get_onnxruntime_output(model, [x_np, y_np], dtype)[0]
+
     for target, ctx in ctx_list():
         tvm_out = get_tvm_output(
             model, [x_np, y_np], target, ctx, out_shape)
-        tvm.testing.assert_allclose(np_out, tvm_out, rtol=1e-5, atol=1e-5)
+        tvm.testing.assert_allclose(onnx_out, tvm_out, rtol=1e-5, atol=1e-5)
 
 
 def test_mod():
     # Mod
-    verify_mod(x_shape=[1, 32, 32], y_shape=[1, 32, 32], fmod=0)
-
-    verify_mod(x_shape=[1, 32, 32], y_shape=[1, 1, 32], fmod=0, dtype="int32")
+    verify_mod(x_shape=[1, 32, 32], y_shape=[1, 1, 32], fmod=0, out_shape=(1, 32, 32), dtype="int32")
+    verify_mod(x_shape=[1, 32, 32, 32], y_shape=[1, 32, 32, 32], fmod=0, out_shape=(1, 32, 32, 32), dtype="int32")
 
     # fmod
-    verify_mod(x_shape=[1, 1, 32], y_shape=[1, 32, 32], fmod=1)
-
-    verify_mod(x_shape=[1, 32, 32], y_shape=[1, 32, 32], fmod=1, dtype="int32")
+    verify_mod(x_shape=[1, 32, 32], y_shape=[1, 32, 32], fmod=1, out_shape=(1, 32, 32), dtype="int32")
+    verify_mod(x_shape=[1, 1, 32, 32], y_shape=[1, 32, 32, 32], fmod=1, out_shape=(1, 32, 32, 32))
+    verify_mod(x_shape=[1, 32, 32, 32], y_shape=[1, 1, 32, 32], fmod=1, out_shape=(1, 32, 32, 32))
+    verify_mod(x_shape=[1, 32, 32, 32], y_shape=[1, 32, 32, 32], fmod=1, out_shape=(1, 32, 32, 32), dtype="int32")
+    verify_mod(x_shape=[1, 32, 32, 32], y_shape=[1, 32, 32, 32], fmod=1, out_shape=(1, 32, 32, 32))
 
 
 def verify_xor(x_shape, y_shape):

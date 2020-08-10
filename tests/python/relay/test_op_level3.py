@@ -21,6 +21,7 @@ import pytest
 import tvm
 from tvm import te
 from tvm import relay
+from tvm.error import TVMError
 from tvm.relay import create_executor, transform
 from tvm.relay.testing import ctx_list, check_grad, run_infer_type
 
@@ -84,6 +85,22 @@ def test_clip():
     ref_res = np.clip(data, 1., 4.)
     np.testing.assert_allclose(op_res.asnumpy(), ref_res, rtol=0.01)
 
+def test_fixed_point_multiply():
+    # Test 23 * 1/16
+    # [m,s] = [0.5, -3] = frexp(1/16)
+    # M = 0.5*2^31 = 1073741824
+    # so M = 1073741824 and s = -3
+
+    a = relay.var("a", relay.TensorType((10, 4), "int32"))
+    y = relay.fixed_point_multiply(a, 1073741824, -3)
+    yy = run_infer_type(y)
+    assert yy.checked_type == relay.TensorType((10, 4), "int32")
+
+    data = 23*np.ones((10, 4)).astype('int32')
+    intrp = create_executor()
+    op_res = intrp.evaluate(y, { a: relay.const(data) })
+    ref_res = np.ones((10, 4)).astype('int32')
+    np.testing.assert_allclose(op_res.asnumpy(), ref_res, atol=1)
 
 def test_reinterpret():
     a = relay.var("a", relay.TensorType((1000, 4), "float32"))
@@ -264,6 +281,13 @@ def test_reshape():
     verify_reshape((2, 3, 4), (-3, -2), (6, 4))
     verify_reshape((2, 3, 4), (-4, 1, 2, -2), (1, 2, 3, 4))
     verify_reshape((2, 3, 4), (2, -4, -1, 3, -2), (2, 1, 3, 4))
+
+
+def test_reshape_fail():
+    with pytest.raises(TVMError) as reshape_err:
+        x = relay.var("x", relay.TensorType([2,3], "float32"))
+        z = relay.reshape(x, [7])
+        zz = run_infer_type(z)
 
 
 def test_reshape_like_infer_type():
@@ -1054,6 +1078,7 @@ if __name__ == "__main__":
     test_transpose()
     test_reshape_infer_type()
     test_reshape()
+    test_reshape_fail()
     test_reshape_like_infer_type()
     test_reshape_like()
     test_take_infer_type()
@@ -1079,3 +1104,4 @@ if __name__ == "__main__":
     test_isinf()
     test_unravel_index()
     test_sparse_to_dense()
+    test_fixed_point_multiply()

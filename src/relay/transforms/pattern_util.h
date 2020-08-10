@@ -495,6 +495,14 @@ inline Expr Round(Expr x) {
 
 inline Expr Clip(Expr x, double a_min, double a_max) { return MakeClip(x, a_min, a_max); }
 
+inline Expr FixedPointMultiply(Expr x, int32_t multiplier, int32_t shift) {
+  static const Op& op = Op::Get("fixed_point_multiply");
+  auto attrs = make_object<FixedPointMultiplyAttrs>();
+  attrs->multiplier = multiplier;
+  attrs->shift = shift;
+  return Call(op, {x}, Attrs(attrs), {});
+}
+
 inline Expr Add(Expr lhs, Expr rhs) {
   static const Op& op = Op::Get("add");
   return Call(op, {lhs, rhs}, Attrs(), {});
@@ -572,8 +580,9 @@ inline Expr Mean(Expr data, Array<Integer> axis, bool keepdims, bool exclude) {
   return MakeReduce(data, axis, keepdims, exclude, "mean");
 }
 
-inline Expr Variance(Expr data, Expr mean, Array<Integer> axis, bool keepdims, bool exclude) {
-  return MakeVariance(data, mean, axis, keepdims, exclude);
+inline Expr Variance(Expr data, Expr mean, Array<Integer> axis, bool keepdims, bool exclude,
+                     bool unbiased = false) {
+  return MakeVariance(data, mean, axis, keepdims, exclude, unbiased);
 }
 
 static inline Expr Where(const Expr& condition, const Expr& x, const Expr& y) {

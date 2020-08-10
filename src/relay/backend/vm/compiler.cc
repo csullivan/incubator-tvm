@@ -31,7 +31,7 @@
 #include <tvm/relay/interpreter.h>
 #include <tvm/relay/qnn/transform.h>
 #include <tvm/relay/transform.h>
-#include <tvm/runtime/vm.h>
+#include <tvm/runtime/vm/vm.h>
 #include <tvm/support/logging.h>
 #include <tvm/te/operation.h>
 
@@ -284,6 +284,7 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
       case Opcode::AllocClosure:
       case Opcode::AllocStorage:
       case Opcode::ShapeOf:
+      case Opcode::ReshapeTensor:
       case Opcode::Move:
       case Opcode::InvokeClosure:
         last_register_ = instr.dst;
@@ -601,6 +602,15 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
                    this->VisitExpr(args[0]);
                    Emit(Instruction::ShapeOf(last_register_, NewRegister()));
                  })
+          .Match("vm.reshape_tensor",
+                 [this](const Array<Expr>& args, const Attrs& attrs, const Array<Type>& type_arg) {
+                   CHECK_EQ(args.size(), 2u);
+                   this->VisitExpr(args[0]);
+                   auto tensor_reg = last_register_;
+                   this->VisitExpr(args[1]);
+                   auto shape_reg = last_register_;
+                   Emit(Instruction::ReshapeTensor(tensor_reg, shape_reg, NewRegister()));
+                 })
           .Match("memory.kill",
                  [](const Array<Expr>& args, const Attrs& attrs, const Array<Type>& type_arg) {
                    LOG(FATAL) << "memory.kill is not yet supported";
@@ -917,6 +927,7 @@ IRModule VMCompiler::OptimizeModule(const IRModule& mod, const TargetsMap& targe
   Array<Pass> pass_seqs;
   Array<runtime::String> entry_functions{"main"};
   pass_seqs.push_back(transform::RemoveUnusedFunctions(entry_functions));
+  pass_seqs.push_back(transform::ToBasicBlockNormalForm());
   // Run all dialect legalization passes.
   pass_seqs.push_back(relay::qnn::transform::Legalize());
 

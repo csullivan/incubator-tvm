@@ -2587,7 +2587,7 @@ def from_mxnet(symbol,
             raise ValueError("arg_params and aux_params ae not used when importing HybridBlock")
         params = {}
         for k, v in symbol.collect_params().items():
-            params[k] = _nd.array(v.data().asnumpy())
+            params[k] = _nd.array(v.data().asnumpy().astype(dtype))
         inputs = []
         for name in shape:
             inputs.append(mx.sym.Variable(name))

@@ -196,6 +196,7 @@ def lower(
     if is_legacy_te_schedule:
         pass_list += [
             tvm.tir.transform.InjectPrefetch(),
+            tvm.tir.transform.TextureFlatten(64, instrument_bound_checkers),
             tvm.tir.transform.StorageFlatten(64, instrument_bound_checkers),
         ]
     else:

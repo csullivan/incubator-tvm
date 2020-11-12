@@ -142,6 +142,7 @@ class TVMScriptPrinter : public StmtFunctor<Doc(const Stmt&)>,
 
   Doc VisitType_(const PrimTypeNode* node) override;
   Doc VisitType_(const PointerTypeNode* node) override;
+  Doc VisitType_(const TextureTypeNode* node) override;
   Doc VisitType_(const TupleTypeNode* node) override;
 
   Doc PrintBody(const Stmt& body);
@@ -765,6 +766,12 @@ Doc TVMScriptPrinter::VisitType_(const PrimTypeNode* node) {
 Doc TVMScriptPrinter::VisitType_(const PointerTypeNode* node) {
   Doc doc;
   doc << "ty.Ptr[" << Print(node->element_type) << "]";
+  return doc;
+}
+
+Doc TVMScriptPrinter::VisitType_(const TextureTypeNode* node) {
+  Doc doc;
+  doc << "ty.Texture[" << Print(node->element_type) << "]";
   return doc;
 }
 

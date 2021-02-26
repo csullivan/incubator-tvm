@@ -32,8 +32,6 @@
 namespace tvm {
 namespace relay {
 
-using IntegerArray = Array<Integer>;
-
 struct StorageToken {
   /*! \brief Reference counter */
   int ref_counter{0};
@@ -219,6 +217,7 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
       std::vector<Integer> storage_ids;
       std::vector<Integer> device_types;
       std::vector<Integer> sid_sizes_byte;
+      std::vector<String> storage_scopes;
       for (StorageToken* tok : kv.second) {
         if (tok->device_type) {
           num_annotated_nodes++;
@@ -227,8 +226,9 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
         storage_ids.push_back(tok->storage_id);
         device_types.push_back(tok->device_type);
         sid_sizes_byte.push_back(GetMemorySize(tok));
+        storage_scopes.push_back(tok->storage_scope);
       }
-      std::vector<ObjectRef> fields{IntegerArray{storage_ids}, IntegerArray{device_types}, IntegerArray{sid_sizes_byte}};
+      std::vector<ObjectRef> fields{IntegerArray{storage_ids}, IntegerArray{device_types}, IntegerArray{sid_sizes_byte}, Array<String>{storage_scopes}};
       smap.Set(GetRef<Expr>(kv.first), runtime::ADT::Tuple(fields));
     }
     // Either all or none of the nodes should be annotated.

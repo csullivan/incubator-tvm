@@ -251,7 +251,7 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
     std::vector<StorageToken*> tokens;
 
     for (StorageToken* tok : it->second) {
-      if (can_realloc) {
+      if (can_realloc && tok->storage_scope == "global") {
         tokens.push_back(Request(tok));
       } else {
         // Allocate a new token,

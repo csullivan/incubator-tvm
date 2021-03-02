@@ -180,8 +180,10 @@ class TVM_DLL GraphRuntime : public ModuleNode {
  protected:
   // Memory pool entry.
   struct PoolEntry {
-    size_t size;
     int device_type;
+    size_t size;
+    std::vector<int64_t> shape;
+    DLDataType dtype;
     int param_data_entry;
     NDArray linked_param;
     //    PoolEntry(int s, int dev_type, void* pre_linked_param) :

@@ -296,7 +296,7 @@ void GraphRuntime::SetupStorage() {
 
     uint32_t sid = static_cast<uint32_t>(storage_id);
     if (sid >= pool_entry.size()) {
-      pool_entry.resize(sid + 1, {0, -1});
+      pool_entry.resize(sid + 1, {-1, 0});
     } else {
       ICHECK(pool_entry[sid].device_type == -1 || pool_entry[sid].device_type == device_type)
           << "The same pool entry cannot be assigned to multiple devices";
@@ -313,8 +313,13 @@ void GraphRuntime::SetupStorage() {
       pool_entry[sid].linked_param = lookup_rv;
     }
     pool_entry[sid].param_data_entry = i;
-    pool_entry[sid].size = std::max(pool_entry[sid].size, bytes);
     pool_entry[sid].device_type = device_type;
+    if (bytes > pool_entry[sid].size)
+    {
+      pool_entry[sid].size = bytes;
+      pool_entry[sid].shape = attrs_.shape[i];
+      pool_entry[sid].dtype = t;
+    }
   }
 
   // Allocate the space.
@@ -328,9 +333,7 @@ void GraphRuntime::SetupStorage() {
     if (pit.linked_param.defined()) {
       storage_pool_.push_back(pit.linked_param);
     } else {
-      std::vector<int64_t> shape;
-      shape.push_back(static_cast<int64_t>(pit.size + 3) / 4);
-      storage_pool_.push_back(NDArray::Empty(shape, DLDataType{kDLFloat, 32, 1}, ctx));
+      storage_pool_.push_back(NDArray::Empty(pit.shape, pit.dtype, ctx));
     }
   }
 

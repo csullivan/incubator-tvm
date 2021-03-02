@@ -284,6 +284,7 @@ void GraphExecutor::SetupStorage() {
   // Find the maximum space size.
   for (size_t i = 0; i < attrs_.shape.size(); ++i) {
     int storage_id = attrs_.storage_id[i];
+    std::string storage_scope = attrs_.storage_scope[i];
     // Use the fallback device if no device index is available.
     int device_type = static_cast<int>(devices_[0].device_type);
     if (!attrs_.device_index.empty()) {
@@ -320,6 +321,7 @@ void GraphExecutor::SetupStorage() {
     pool_entry[sid].param_data_entry = i;
     pool_entry[sid].size = std::max(pool_entry[sid].size, bytes);
     pool_entry[sid].device_type = device_type;
+    pool_entry[sid].scope = storage_scope;
   }
 
   // Allocate the space.
@@ -335,7 +337,8 @@ void GraphExecutor::SetupStorage() {
     } else {
       std::vector<int64_t> shape;
       shape.push_back(static_cast<int64_t>(pit.size + 3) / 4);
-      storage_pool_.push_back(NDArray::Empty(shape, DLDataType{kDLFloat, 32, 1}, dev));
+      Optional<String> scope = String(pit.scope);
+      storage_pool_.push_back(NDArray::Empty(shape, DLDataType{kDLFloat, 32, 1}, dev, scope));
     }
   }
 

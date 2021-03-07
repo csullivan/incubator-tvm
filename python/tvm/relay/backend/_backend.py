@@ -21,7 +21,7 @@ from tvm.target import Target
 
 
 @tvm._ffi.register_func("relay.backend.lower")
-def lower(sch, inputs, func_name, source_func):
+def lower(sch, inputs, func_name, source_func, binds=None):
     """Backend function for lowering.
 
     Parameters
@@ -38,6 +38,11 @@ def lower(sch, inputs, func_name, source_func):
     source-func : tvm.relay.Function
         The source function to be lowered.
 
+    binds : dict of :any:`Tensor` to :any:`Buffer`, optional
+        Dictionary that maps the Tensor to Buffer which specified the data layout
+        requirement of the function. By default, a new compact buffer is created
+        for each tensor in the argument.
+
     Returns
     -------
     mod : tvm.IRModule
@@ -47,7 +52,7 @@ def lower(sch, inputs, func_name, source_func):
     import traceback
 
     try:
-        f = tvm.driver.lower(sch, inputs, name=func_name)
+        f = tvm.driver.lower(sch, inputs, name=func_name, binds=binds)
         # logging.debug("lower function %s", func_name)
         # logging.debug("%s", _build.lower(sch, inputs, simple_mode=True))
     except Exception:
@@ -60,7 +65,7 @@ def lower(sch, inputs, func_name, source_func):
 
 
 @tvm._ffi.register_func("relay.backend.build")
-def build(mod, target, target_host=None):
+def build(mod, target, target_host=None, binds=None):
     """Backend build function.
 
     Parameters
@@ -81,7 +86,7 @@ def build(mod, target, target_host=None):
     """
     target_host = None if target_host == "" else target_host
     target, target_host = Target.check_and_update_host_consist(target, target_host)
-    return tvm.driver.build(mod, target=target)
+    return tvm.driver.build(mod, target=target, binds=binds)
 
 
 @tvm._ffi.register_func("relay._tensor_value_repr")

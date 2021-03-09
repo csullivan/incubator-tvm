@@ -61,9 +61,8 @@ public:
     }
     else if (op->op.same_as(builtin::text2d_store())) {
       var_access_map_[op->args[0].as<VarNode>()] |= write_access;
-    } else {
-      StmtExprVisitor::VisitExpr_(op);
     }
+    StmtExprVisitor::VisitExpr_(op);
   }
 
 private:

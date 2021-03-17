@@ -28,7 +28,6 @@ def conv2d_strategy_adreno(attrs, inputs, out_type, target):
     strategy = _op.OpStrategy()
     data, kernel = inputs
     dilation_h, dilation_w = attrs.get_int_tuple("dilation")
-    stride_h, stride_w = attrs.get_int_tuple("strides")
     groups = attrs.groups
     data_layout = attrs.data_layout
     kernel_layout = attrs.kernel_layout

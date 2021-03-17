@@ -24,7 +24,10 @@
 #define TVM_TIR_IR_BUFFER_COMMON_H_
 
 #include <iterator>
+#include <list>
 #include <stack>
+#include <utility>
+#include <vector>
 
 namespace tvm {
 namespace tir {

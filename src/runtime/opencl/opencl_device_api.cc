@@ -31,13 +31,14 @@ namespace cl {
 
 namespace {
 std::tuple<size_t, size_t> GetImageInfo(const void* mem_ptr, size_t* origin, size_t* region) {
-  cl_mem mem = static_cast<cl_mem>((void*)mem_ptr);
+  const cl_mem mem = static_cast<cl_mem>(const_cast<void*>(mem_ptr));
   size_t width, height;
   OPENCL_CALL(clGetImageInfo(mem, CL_IMAGE_WIDTH, sizeof(width), &width, NULL));
   OPENCL_CALL(clGetImageInfo(mem, CL_IMAGE_HEIGHT, sizeof(height), &height, NULL));
-  // Current support is for image2d only
-  size_t depth = 1;
+  // Current support is for image2d_t only
+  // TODO(csullivan): Consider adding support for image2d_array_t
   // OPENCL_CALL(clGetImageInfo(mem, CL_IMAGE_DEPTH, sizeof(depth), &depth, NULL));
+  size_t depth = 1;
   region[0] = width;
   region[1] = height;
   region[2] = depth;

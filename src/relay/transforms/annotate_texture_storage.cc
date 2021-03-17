@@ -40,9 +40,7 @@ namespace {
 class StorageInfo : private ExprVisitor {
  public:
   StorageInfo(const Map<Expr, Integer>& dev_map, const Map<Integer, Target>& target_map)
-      : device_ids_(dev_map), targets_(target_map) {
-    ;
-  }
+      : device_ids_(dev_map), targets_(target_map) {}
   static Map<Expr, Array<String>> GetStorageMap(const Expr& expr, const Map<Expr, Integer>& dev_map,
                                                 const Map<Integer, Target>& target_map) {
     StorageInfo storage_info(dev_map, target_map);

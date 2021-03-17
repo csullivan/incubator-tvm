@@ -272,7 +272,7 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
 
   LoweredOutput Codegen(relay::Function func) {
     auto pf = GetPackedFunc("relay.backend.GraphPlanMemory");
-    storage_device_map_ = (*pf)(func);
+    storage_device_map_ = (*pf)(func, targets_);
     UpdateMainWorkspaceSize(func);
     // First we convert all the parameters into input nodes.
     for (auto param : func->params) {

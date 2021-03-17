@@ -416,18 +416,13 @@ private:
 class TokenAllocator {
 public:
   StorageToken* Alloc(StorageToken* proto) {
-    //return token_1d_.Alloc(proto, storage_ids_++);
     return Is2DStorage(proto) ? token_2d_.Alloc(proto, storage_ids_++) : token_1d_.Alloc(proto, storage_ids_++);
   }
   StorageToken* Request(StorageToken* proto) {
     StorageToken* token = Is2DStorage(proto) ? token_2d_.Request(proto) : token_1d_.Request(proto);
     return token ? token : this->Alloc(proto);
-    // StorageToken* token = token_1d_.Request(proto);
-    // if (token == nullptr) { token = ; }
-    // return token;
   }
   void CheckForRelease(StorageToken* tok) {
-    // return token_1d_.CheckForRelease(tok);
     return Is2DStorage(tok) ? token_2d_.CheckForRelease(tok) : token_1d_.CheckForRelease(tok);
   }
   static bool Is2DStorage(StorageToken* tok) { return relay::Is2DStorage(tok->storage_scope); }

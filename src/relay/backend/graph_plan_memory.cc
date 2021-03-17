@@ -26,13 +26,16 @@
 #include <tvm/relay/expr.h>
 #include <tvm/relay/expr_functor.h>
 #include <tvm/tir/op.h>
+#include <tvm/target/target.h>
 
 #include "../../support/arena.h"
 
 namespace tvm {
 namespace relay {
 
-using IntegerArray = Array<Integer>;
+using TargetsMap = Map<Integer, Target>;
+using Texture2DShape = runtime::Texture2DShape<int64_t>;
+constexpr auto Is2DStorage = runtime::IsTextureStorage;
 
 struct StorageToken {
   /*! \brief Reference counter */
@@ -46,6 +49,8 @@ struct StorageToken {
   int device_type{0};
   /*! \brief The storage id */
   int64_t storage_id{-1};
+  /*! \brief The storage scope */
+  std::string storage_scope{"global"};
 };
 
 class StorageAllocaBaseVisitor : public ExprVisitor {
@@ -125,14 +130,48 @@ class StorageAllocaBaseVisitor : public ExprVisitor {
   virtual void CreateToken(const ExprNode* op, bool can_realloc) = 0;
 };
 
+/*!
+ * \brief Collect the target specific tensor storage info for each expression's output.
+ * \param expr The expression.
+ * \param expr The device id map which can be used to infer device specific storage scope availability.
+ * \param expr The target mapping from device id to target.
+ * \return The device based storage mapping.
+ */
+Map<Expr, Array<String>> CollectStorageInfo(const Expr& expr, const Map<Expr, Integer>& dev_map, const TargetsMap& target_map) {
+  auto less = [](Integer i, Integer j) {
+    auto i_imm = i.as<tir::IntImmNode>();
+    auto j_imm = j.as<tir::IntImmNode>();
+    ICHECK(i_imm && j_imm);
+    return i_imm->value < j_imm->value;
+  };
+  std::set<Integer, decltype(less)> device_types(less);
+  for (auto& kv : target_map) {
+    device_types.insert(kv.first);
+  }
+  std::string ftarget_prefix = "relay.backend";
+  for (auto& dev_id : device_types) {
+    Target target = target_map[dev_id];
+    ftarget_prefix += ("." + target->kind->name);
+    if (Optional<String> t_device = target->GetAttr<String>("device")) {
+      ftarget_prefix += ("." + t_device.value());
+    }
+  }
+  Map<Expr, Array<String>> storage_info = {};
+  if (const auto* f = runtime::Registry::Get(ftarget_prefix + "._CollectStorageInfo")) {
+    storage_info = (*f)(expr, dev_map, target_map);
+  }
+  return storage_info;
+}
+
 class StorageAllocaInit : protected StorageAllocaBaseVisitor {
  public:
   explicit StorageAllocaInit(support::Arena* arena) : arena_(arena) {}
 
   /*! \return The internal token map */
   std::unordered_map<const ExprNode*, std::vector<StorageToken*> > GetInitTokenMap(
-      const Function& func) {
+      const Function& func, const TargetsMap& targets) {
     node_device_map_ = CollectDeviceInfo(func);
+    node_storage_map_ = CollectStorageInfo(func, node_device_map_, targets);
     this->Run(func);
     return std::move(token_map_);
   }
@@ -143,15 +182,26 @@ class StorageAllocaInit : protected StorageAllocaBaseVisitor {
   void CreateToken(const ExprNode* op, bool can_realloc) final {
     ICHECK(!token_map_.count(op));
     std::vector<StorageToken*> tokens;
+    auto expr = GetRef<Expr>(op);
     int device_type =
-        node_device_map_.count(GetRef<Expr>(op)) ? node_device_map_[GetRef<Expr>(op)]->value : 0;
+      node_device_map_.count(expr) ? node_device_map_[expr]->value : 0;
+
+    Optional<Array<String>> storage_info;
+    if (node_storage_map_.count(GetRef<Expr>(op))) {
+      storage_info = node_storage_map_[GetRef<Expr>(op)];
+    }
+
     if (const auto* tuple_type = op->checked_type().as<TupleTypeNode>()) {
-      for (Type t : tuple_type->fields) {
-        const auto* ttype = t.as<TensorTypeNode>();
+      if (storage_info.defined()) { ICHECK_EQ(tuple_type->fields.size(), storage_info.value().size()); }
+      for (size_t i = 0; i < tuple_type->fields.size(); i++) {
+        const auto* ttype = tuple_type->fields[i].as<TensorTypeNode>();
         ICHECK(ttype);
         StorageToken* token = arena_->make<StorageToken>();
         token->ttype = ttype;
         token->device_type = device_type;
+        if (storage_info.defined()) {
+          token->storage_scope = storage_info.value()[i];
+        }
         tokens.push_back(token);
       }
     } else {
@@ -160,6 +210,9 @@ class StorageAllocaInit : protected StorageAllocaBaseVisitor {
       StorageToken* token = arena_->make<StorageToken>();
       token->ttype = ttype;
       token->device_type = device_type;
+      if (storage_info.defined()) {
+        token->storage_scope = storage_info.value()[0];
+      }
       tokens.push_back(token);
     }
     token_map_[op] = tokens;
@@ -180,6 +233,7 @@ class StorageAllocaInit : protected StorageAllocaBaseVisitor {
   // allocator
   support::Arena* arena_;
   Map<Expr, Integer> node_device_map_;
+  Map<Expr, Array<String>> node_storage_map_;
 };
 
 class StorageAllocator : public StorageAllocaBaseVisitor {
@@ -196,19 +250,20 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
   }
 
   // Run storage allocation for a function.
-  Map<Expr, Array<IntegerArray> > Plan(const Function& func) {
-    prototype_ = StorageAllocaInit(&arena_).GetInitTokenMap(func);
+  Map<Expr, runtime::ADT> Plan(const Function& func, const TargetsMap& targets) {
+    prototype_ = StorageAllocaInit(&arena_).GetInitTokenMap(func, targets);
     this->Run(func);
 
     // The value of smap contains two integer arrays where the first array
     // contains the planned storage ids and the second holds the device types.
-    Map<Expr, Array<IntegerArray> > smap;
+    Map<Expr, runtime::ADT> smap;
     int num_annotated_nodes = 0;
     int num_nodes = 0;
 
     for (const auto& kv : token_map_) {
       std::vector<Integer> storage_ids;
       std::vector<Integer> device_types;
+      std::vector<String> storage_scopes;
       for (StorageToken* tok : kv.second) {
         if (tok->device_type) {
           num_annotated_nodes++;
@@ -216,8 +271,11 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
         num_nodes++;
         storage_ids.push_back(tok->storage_id);
         device_types.push_back(tok->device_type);
+        storage_scopes.push_back(tok->storage_scope);
       }
-      smap.Set(GetRef<Expr>(kv.first), Array<IntegerArray>({storage_ids, device_types}));
+      std::vector<ObjectRef> fields{
+        Array<Integer>{storage_ids}, Array<Integer>{device_types}, Array<String>{storage_scopes}};
+      smap.Set(GetRef<Expr>(kv.first), runtime::ADT::Tuple(fields));
     }
     // Either all or none of the nodes should be annotated.
     if (num_annotated_nodes != 0 && num_annotated_nodes != num_nodes) {
@@ -237,7 +295,7 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
     ICHECK(it != prototype_.end());
     std::vector<StorageToken*> tokens;
     for (StorageToken* tok : it->second) {
-      if (can_realloc) {
+      if (can_realloc && tok->storage_scope == "global") {
         tokens.push_back(Request(tok));
       } else {
         // Allocate a new token,
@@ -375,8 +433,8 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
   std::unordered_map<const ExprNode*, std::vector<StorageToken*> > prototype_;
 };
 
-Map<Expr, Array<IntegerArray> > GraphPlanMemory(const Function& func) {
-  return StorageAllocator().Plan(func);
+Map<Expr, runtime::ADT> GraphPlanMemory(const Function& func, const TargetsMap& targets) {
+  return StorageAllocator().Plan(func, targets);
 }
 
 TVM_REGISTER_GLOBAL("relay.backend.GraphPlanMemory").set_body_typed(GraphPlanMemory);

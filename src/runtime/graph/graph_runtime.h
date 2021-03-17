@@ -184,6 +184,7 @@ class TVM_DLL GraphRuntime : public ModuleNode {
     int device_type;
     int param_data_entry;
     NDArray linked_param;
+    std::string scope;
     //    PoolEntry(int s, int dev_type, void* pre_linked_param) :
     //        size(s), device_type(dev_type), pre_linked_param(std::move(pre_linked_param)) {}
   };
@@ -274,6 +275,7 @@ class TVM_DLL GraphRuntime : public ModuleNode {
     std::vector<int> storage_id;
     std::vector<int> device_index;
     std::vector<std::string> dltype;
+    std::vector<std::string> storage_scope;
     std::vector<std::vector<int64_t>> shape;
     // The graph attribute fields.
     void Load(dmlc::JSONReader* reader) {
@@ -299,6 +301,15 @@ class TVM_DLL GraphRuntime : public ModuleNode {
           reader->Read(&storage_id);
           ICHECK(!reader->NextArrayItem());
           bitmask |= 2;
+	} else if (key == "storage_scope") {
+          reader->BeginArray();
+          ICHECK(reader->NextArrayItem());
+          reader->Read(&type);
+          ICHECK_EQ(type, "list_str");
+          ICHECK(reader->NextArrayItem());
+          reader->Read(&storage_scope);
+          ICHECK(!reader->NextArrayItem());
+          bitmask |= 1;
         } else if (key == "shape") {
           reader->BeginArray();
           ICHECK(reader->NextArrayItem());

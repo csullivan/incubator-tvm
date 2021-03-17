@@ -25,11 +25,11 @@
 #include <tvm/relay/analysis.h>
 #include <tvm/relay/expr.h>
 #include <tvm/relay/expr_functor.h>
-#include <tvm/tir/op.h>
 #include <tvm/target/target.h>
+#include <tvm/tir/op.h>
 
-#include "../../support/arena.h"
 #include "../../runtime/texture.h"
+#include "../../support/arena.h"
 
 namespace tvm {
 namespace relay {
@@ -134,11 +134,12 @@ class StorageAllocaBaseVisitor : public ExprVisitor {
 /*!
  * \brief Collect the target specific tensor storage info for each expression's output.
  * \param expr The expression.
- * \param expr The device id map which can be used to infer device specific storage scope availability.
- * \param expr The target mapping from device id to target.
- * \return The device based storage mapping.
+ * \param expr The device id map which can be used to infer device specific storage scope.
+ * \param expr The target mapping from device id to target. \return The device based
+ * storage mapping.
  */
-Map<Expr, Array<String>> CollectStorageInfo(const Expr& expr, const Map<Expr, Integer>& dev_map, const TargetsMap& target_map) {
+Map<Expr, Array<String>> CollectStorageInfo(const Expr& expr, const Map<Expr, Integer>& dev_map,
+                                            const TargetsMap& target_map) {
   auto less = [](Integer i, Integer j) {
     auto i_imm = i.as<tir::IntImmNode>();
     auto j_imm = j.as<tir::IntImmNode>();
@@ -169,7 +170,7 @@ class StorageAllocaInit : protected StorageAllocaBaseVisitor {
   explicit StorageAllocaInit(support::Arena* arena) : arena_(arena) {}
 
   /*! \return The internal token map */
-  std::unordered_map<const ExprNode*, std::vector<StorageToken*> > GetInitTokenMap(
+  std::unordered_map<const ExprNode*, std::vector<StorageToken*>> GetInitTokenMap(
       const Function& func, const TargetsMap& targets) {
     node_device_map_ = CollectDeviceInfo(func);
     node_storage_map_ = CollectStorageInfo(func, node_device_map_, targets);
@@ -184,8 +185,7 @@ class StorageAllocaInit : protected StorageAllocaBaseVisitor {
     ICHECK(!token_map_.count(op));
     std::vector<StorageToken*> tokens;
     auto expr = GetRef<Expr>(op);
-    int device_type =
-      node_device_map_.count(expr) ? node_device_map_[expr]->value : 0;
+    int device_type = node_device_map_.count(expr) ? node_device_map_[expr]->value : 0;
 
     Optional<Array<String>> storage_info;
     if (node_storage_map_.count(GetRef<Expr>(op))) {
@@ -193,7 +193,9 @@ class StorageAllocaInit : protected StorageAllocaBaseVisitor {
     }
 
     if (const auto* tuple_type = op->checked_type().as<TupleTypeNode>()) {
-      if (storage_info.defined()) { ICHECK_EQ(tuple_type->fields.size(), storage_info.value().size()); }
+      if (storage_info.defined()) {
+        ICHECK_EQ(tuple_type->fields.size(), storage_info.value().size());
+      }
       for (size_t i = 0; i < tuple_type->fields.size(); i++) {
         const auto* ttype = tuple_type->fields[i].as<TensorTypeNode>();
         ICHECK(ttype);
@@ -238,7 +240,7 @@ class StorageAllocaInit : protected StorageAllocaBaseVisitor {
 };
 
 class TokenAllocator1D {
-public:
+ public:
   /*!
    * \brief Request a storage token for a given prototype.
    * \param prototype. The prototype storage token.
@@ -340,7 +342,8 @@ public:
     size *= DivRoundUp(ttype->dtype.bits() * ttype->dtype.lanes(), 8);
     return size;
   }
-private:
+
+ private:
   // scale used for rough match
   const size_t match_range_{16};
   // free list of storage entry
@@ -350,7 +353,7 @@ private:
 };
 
 class TokenAllocator2D {
-public:
+ public:
   /*!
    * \brief Request a storage token for a given prototype.
    * \param prototype. The prototype storage token.
@@ -430,14 +433,17 @@ public:
   Texture2DShape GetSize2D(StorageToken* prototype) {
     const TensorTypeNode* ttype = prototype->ttype;
     ICHECK(ttype != nullptr);
-    size_t axis = runtime::DefaultTextureLayoutSeparator(ttype->shape.size(), prototype->storage_scope);
+    size_t axis =
+        runtime::DefaultTextureLayoutSeparator(ttype->shape.size(), prototype->storage_scope);
     struct Shape {
       const Array<PrimExpr>& shape;
       int64_t operator[](size_t i) const { return *tir::as_const_int(shape[i]); }
     };
-    return runtime::ApplyTexture2DFlattening<int64_t>(Shape{ttype->shape}, ttype->shape.size(), axis);
+    return runtime::ApplyTexture2DFlattening<int64_t>(Shape{ttype->shape}, ttype->shape.size(),
+                                                      axis);
   }
-private:
+
+ private:
   struct MemBlock {
     StorageToken* token_;
     int64_t x_;
@@ -449,9 +455,10 @@ private:
 };
 
 class TokenAllocator {
-public:
+ public:
   StorageToken* Alloc(StorageToken* proto) {
-    return Is2DStorage(proto) ? token_2d_.Alloc(proto, storage_ids_++) : token_1d_.Alloc(proto, storage_ids_++);
+    return Is2DStorage(proto) ? token_2d_.Alloc(proto, storage_ids_++)
+                              : token_1d_.Alloc(proto, storage_ids_++);
   }
   StorageToken* Request(StorageToken* proto) {
     StorageToken* token = Is2DStorage(proto) ? token_2d_.Request(proto) : token_1d_.Request(proto);
@@ -462,12 +469,11 @@ public:
   }
   static bool Is2DStorage(StorageToken* tok) { return relay::Is2DStorage(tok->storage_scope); }
 
-private:
+ private:
   int64_t storage_ids_{0};
   TokenAllocator1D token_1d_;
   TokenAllocator2D token_2d_;
 };
-
 
 class StorageAllocator : public StorageAllocaBaseVisitor {
  public:
@@ -495,8 +501,8 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
         device_types.push_back(tok->device_type);
         storage_scopes.push_back(tok->storage_scope);
       }
-      std::vector<ObjectRef> fields{
-        Array<Integer>{storage_ids}, Array<Integer>{device_types}, Array<String>{storage_scopes}};
+      std::vector<ObjectRef> fields{Array<Integer>{storage_ids}, Array<Integer>{device_types},
+                                    Array<String>{storage_scopes}};
       smap.Set(GetRef<Expr>(kv.first), runtime::ADT::Tuple(fields));
     }
     // Either all or none of the nodes should be annotated.

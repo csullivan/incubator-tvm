@@ -188,7 +188,8 @@ class TVM_DLL DeviceAPI {
    * \param height The height of the 2d texture in elements
    * \param type_hint The type of elements.
    */
-  virtual void* AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint = {});
+  virtual void* AllocTexture(TVMContext ctx, size_t width, size_t height,
+                             DLDataType type_hint = {});
   /*!
    * \brief Allocate a two dimensional temporal texture workspace on device
    *
@@ -205,7 +206,8 @@ class TVM_DLL DeviceAPI {
    * \param height The height of the 2d texture in elements
    * \param type_hint The type of elements.
    */
-  virtual void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint = {});
+  virtual void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height,
+                                      DLDataType type_hint = {});
   /*!
    * \brief Free the two dimensional temporal texture workspace.
    *

@@ -495,7 +495,8 @@ class GraphRuntimeCodegen : public backend::MemoizedExprTranslator<std::vector<G
     for (auto node : nodes_) {
       const auto& shape_vec = dmlc::get<ShapeVector>(node->attrs_["shape"]);
       const auto& storage_id = dmlc::get<std::vector<int64_t>>(node->attrs_["storage_id"]);
-      const auto& storage_scope = dmlc::get<std::vector<std::string>>(node->attrs_["storage_scope"]);
+      const auto& storage_scope =
+          dmlc::get<std::vector<std::string>>(node->attrs_["storage_scope"]);
       const auto& dtype_vec = dmlc::get<std::vector<std::string>>(node->attrs_["dtype"]);
 
       ICHECK_EQ(node->num_outputs_, shape_vec.size());
@@ -587,7 +588,7 @@ class GraphRuntimeCodegenModule : public runtime::ModuleNode {
         ICHECK_EQ(args.num_args, 2) << "The expected of arguments are: "
                                     << "runtime::Module mod and Map<Integer, Target> targets";
         void* mod = args[0];
-        TargetsMap targets =  args[1];
+        TargetsMap targets = args[1];
         codegen_ =
             std::make_shared<GraphRuntimeCodegen>(reinterpret_cast<runtime::Module*>(mod), targets);
       });

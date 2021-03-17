@@ -21,10 +21,10 @@
  * \file texture_pool.h
  * \brief Texture pool utility.
  */
-#include "texture.h"
-
 #include <limits>
 #include <memory>
+
+#include "texture.h"
 
 namespace tvm {
 namespace runtime {
@@ -32,18 +32,17 @@ namespace runtime {
 class TexturePool::Pool {
  public:
   Pool() = default;
-  void* Alloc(TVMContext ctx, DeviceAPI* device, size_t width, size_t height, DLDataType type_hint) {
+  void* Alloc(TVMContext ctx, DeviceAPI* device, size_t width, size_t height,
+              DLDataType type_hint) {
     Entry e;
     e.data = nullptr;
-    if (free_list_.size() != 0)
-    {
+    if (free_list_.size() != 0) {
       int64_t req_size = height * width;
       Entry new_mem;
       int64_t min_added_size = std::numeric_limits<int64_t>::max();
       int64_t min_wasted_size = std::numeric_limits<int64_t>::max();
       std::vector<Entry>::iterator best_mem;
-      for (auto it = free_list_.begin(); it != free_list_.end(); ++it)
-      {
+      for (auto it = free_list_.begin(); it != free_list_.end(); ++it) {
         if (it->type.code != type_hint.code) {
           continue;
         }
@@ -62,13 +61,11 @@ class TexturePool::Pool {
         }
       }
 
-      if (min_added_size == 0)
-      {
+      if (min_added_size == 0) {
         // use existing block
         e = *best_mem;
         free_list_.erase(best_mem);
-      }
-      else if (min_added_size <= req_size) {
+      } else if (min_added_size <= req_size) {
         // if added size is less or equal to
         // what is needed by alloc, then grow entry
         device->FreeDataSpace(ctx, best_mem->data);
@@ -79,8 +76,7 @@ class TexturePool::Pool {
       }
     }
 
-    if (e.data == nullptr)
-    {
+    if (e.data == nullptr) {
       // create new block
       e.data = device->AllocTexture(ctx, width, height, type_hint);
       e.x = width;
@@ -159,7 +155,7 @@ void* TexturePool::AllocTexture(TVMContext ctx, size_t width, size_t height, DLD
 
 void TexturePool::FreeTexture(TVMContext ctx, void* ptr) {
   ICHECK(static_cast<size_t>(ctx.device_id) < array_.size() && array_[ctx.device_id] != nullptr)
-    << "Attempt to free texture from null texture pool";
+      << "Attempt to free texture from null texture pool";
   array_[ctx.device_id]->Free(ptr);
 }
 

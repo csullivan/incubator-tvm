@@ -209,7 +209,8 @@ void* DeviceAPI::AllocTexture(TVMContext ctx, size_t width, size_t height, DLDat
   return nullptr;
 }
 
-void* DeviceAPI::AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) {
+void* DeviceAPI::AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height,
+                                       DLDataType type_hint) {
   LOG(FATAL) << "Device does not support texture memory.";
   return nullptr;
 }
@@ -475,10 +476,8 @@ void* TVMBackendAllocTexture(int device_type, int device_id, uint64_t width, uin
   type_hint.bits = static_cast<decltype(type_hint.bits)>(dtype_bits_hint);
   type_hint.lanes = 1;
 
-  return DeviceAPIManager::Get(ctx)->AllocTextureWorkspace(ctx,
-                                                           static_cast<size_t>(width),
-                                                           static_cast<size_t>(height),
-                                                           type_hint);
+  return DeviceAPIManager::Get(ctx)->AllocTextureWorkspace(ctx, static_cast<size_t>(width),
+                                                           static_cast<size_t>(height), type_hint);
 }
 
 int TVMBackendFreeTexture(int device_type, int device_id, void* ptr) {

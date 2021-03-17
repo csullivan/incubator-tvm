@@ -306,24 +306,22 @@ class BuiltinLower : public StmtExprMutator {
     ICHECK(device_id_.defined()) << "Unknown device id in current IR";
     Stmt throw_last_error = Evaluate(Call(DataType::Int(32), builtin::tvm_throw_last_error(), {}));
 
-    Stmt body = SeqStmt({IfThenElse(Call(DataType::Bool(1), builtin::isnullptr(), {let->var}),
-                                    throw_last_error),
-                         let->body});
-    DataType dtype = let->var->type_annotation.as<TextureTypeNode>()->element_type.as<PrimTypeNode>()->dtype;
+    Stmt body = SeqStmt(
+        {IfThenElse(Call(DataType::Bool(1), builtin::isnullptr(), {let->var}), throw_last_error),
+         let->body});
+    DataType dtype =
+        let->var->type_annotation.as<TextureTypeNode>()->element_type.as<PrimTypeNode>()->dtype;
     Stmt alloca = LetStmt(
         let->var,
         Call(let->var.dtype(), Op::Get("tir.TVMBackendAllocTexture"),
-                    {cast(DataType::Int(32), device_type_),
-                        cast(DataType::Int(32), device_id_),
-                        cast(DataType::UInt(64), call->args[0]),
-                        cast(DataType::UInt(64), call->args[1]),
-                        IntImm(DataType::Int(32), dtype.code()),
-                        IntImm(DataType::Int(32), dtype.bits())}),
+             {cast(DataType::Int(32), device_type_), cast(DataType::Int(32), device_id_),
+              cast(DataType::UInt(64), call->args[0]), cast(DataType::UInt(64), call->args[1]),
+              IntImm(DataType::Int(32), dtype.code()), IntImm(DataType::Int(32), dtype.bits())}),
         body);
 
-    PrimExpr free_op = Call(DataType::Int(32), Op::Get("tir.TVMBackendFreeTexture"),
-                            {cast(DataType::Int(32), device_type_),
-                             cast(DataType::Int(32), device_id_), let->var});
+    PrimExpr free_op = Call(
+        DataType::Int(32), Op::Get("tir.TVMBackendFreeTexture"),
+        {cast(DataType::Int(32), device_type_), cast(DataType::Int(32), device_id_), let->var});
     Stmt free_stmt = IfThenElse(free_op != make_zero(DataType::Int(32)), throw_last_error);
     body = SeqStmt({alloca, free_stmt});
     return body;

@@ -614,7 +614,8 @@ class CompileEngineImpl : public CompileEngineNode {
  public:
   // Lower the function.
   CachedFunc Lower(const CCacheKey& key, const Array<tir::Buffer>& buffers) {
-    return LowerInternal(key, buffers)->cached_func; }
+    return LowerInternal(key, buffers)->cached_func;
+  }
 
   // For now, build one module per function.
   PackedFunc JIT(const CCacheKey& key, const Array<tir::Buffer>& buffers) final {
@@ -776,7 +777,8 @@ class CompileEngineImpl : public CompileEngineNode {
 
     // lower the function
     if (const auto* f = runtime::Registry::Get("relay.backend.lower")) {
-      cache_node->funcs = (*f)(cfunc->schedule, all_args, cache_node->func_name, key->source_func, binds);
+      cache_node->funcs =
+          (*f)(cfunc->schedule, all_args, cache_node->func_name, key->source_func, binds);
     } else {
       using tvm::transform::PassContext;
       With<PassContext> fresh_pass_ctx_scope(PassContext::Create());
@@ -888,7 +890,9 @@ TVM_REGISTER_GLOBAL("relay.backend._CompileEngineClear").set_body_typed([](Compi
 });
 
 TVM_REGISTER_GLOBAL("relay.backend._CompileEngineLower")
-    .set_body_typed([](CompileEngine self, CCacheKey key, Array<tir::Buffer> buffers) { return self->Lower(key, buffers); });
+    .set_body_typed([](CompileEngine self, CCacheKey key, Array<tir::Buffer> buffers) {
+      return self->Lower(key, buffers);
+    });
 
 TVM_REGISTER_GLOBAL("relay.backend._CompileEngineLowerShapeFunc")
     .set_body_typed([](CompileEngine self, CCacheKey key) { return self->LowerShapeFunc(key); });

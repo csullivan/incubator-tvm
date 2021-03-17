@@ -302,7 +302,7 @@ class TVM_DLL GraphRuntime : public ModuleNode {
           reader->Read(&storage_id);
           ICHECK(!reader->NextArrayItem());
           bitmask |= 2;
-	} else if (key == "storage_scope") {
+        } else if (key == "storage_scope") {
           reader->BeginArray();
           ICHECK(reader->NextArrayItem());
           reader->Read(&type);

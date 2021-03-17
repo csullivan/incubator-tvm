@@ -36,12 +36,12 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <unordered_map>
 #include <stack>
+#include <unordered_map>
 
 #include "../../arith/ir_visitor_with_analyzer.h"
-#include "../../runtime/thread_storage_scope.h"
 #include "../../runtime/texture.h"
+#include "../../runtime/thread_storage_scope.h"
 #include "../ir/buffer_common.h"
 #include "arg_binder.h"
 #include "ir_utils.h"
@@ -50,9 +50,9 @@ namespace tvm {
 namespace tir {
 namespace {
 
-using runtime::IsTextureStorage;
-using runtime::DefaultTextureLayoutSeparator;
 using runtime::ApplyTexture2DFlattening;
+using runtime::DefaultTextureLayoutSeparator;
+using runtime::IsTextureStorage;
 
 inline PrimExpr SimplifyOffset(const Array<PrimExpr>& shape, const Array<PrimExpr>& index) {
   PrimExpr base = make_const(DataType::Int(32), 0);
@@ -67,7 +67,7 @@ inline PrimExpr SimplifyOffset(const Array<PrimExpr>& shape, const Array<PrimExp
   }
   return base;
 }
-}
+}  // namespace
 
 class TextureLoweringBase : public StmtExprMutator {
  public:
@@ -93,7 +93,6 @@ class TextureLoweringBase : public StmtExprMutator {
   }
 
  protected:
-
   std::string GetStorageScope(const Buffer& buffer) {
     std::string storage_scope;
     auto it = storage_scope_.find(buffer.get());
@@ -115,9 +114,12 @@ class TextureLoweringBase : public StmtExprMutator {
 class TextureFlattener : public TextureLoweringBase {
  public:
   using StmtExprMutator::VisitStmt_;
-  explicit TextureFlattener(const Map<Var, Buffer>& extern_buffer_map,
-                            const std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>& extern_buffer_binds_)
-    : TextureLoweringBase(extern_buffer_map), buffer_binds_(extern_buffer_binds_) {;}
+  explicit TextureFlattener(
+      const Map<Var, Buffer>& extern_buffer_map,
+      const std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>& extern_buffer_binds_)
+      : TextureLoweringBase(extern_buffer_map), buffer_binds_(extern_buffer_binds_) {
+    ;
+  }
 
   Stmt VisitStmt_(const BufferRealizeNode* op) final {
     if (extern_buf_.count(op->buffer)) {
@@ -136,7 +138,8 @@ class TextureFlattener : public TextureLoweringBase {
       body = this->VisitStmt(op->body);
       ICHECK(op->bounds.size() >= 3) << "Only 2d RGBA texture is currently supported";
       int vec_length = static_cast<int>(op->bounds.back()->extent.as<IntImmNode>()->value);
-      ICHECK(vec_length == 4 || vec_length == 1) << "FCD of texture must be vector of length 1 or 4 (RGBA)";
+      ICHECK(vec_length == 4 || vec_length == 1)
+          << "FCD of texture must be vector of length 1 or 4 (RGBA)";
 
       struct Shape {
         const Array<Range>& bounds;
@@ -185,8 +188,7 @@ class TextureFlattener : public TextureLoweringBase {
   }
 
  protected:
-
-  template<typename T>
+  template <typename T>
   Array<PrimExpr> GetTextureAccessArgs(const T* op, const Buffer& buffer) {
     Array<PrimExpr> args;
     if (let_binding_.count(op->buffer->data)) {
@@ -195,7 +197,7 @@ class TextureFlattener : public TextureLoweringBase {
       args.push_back(buffer->data);
     }
     Array<PrimExpr> row_dims, row_indices, col_dims, col_indices;
-    for (size_t i = 0; i < op->buffer->shape.size()-1; i++) {
+    for (size_t i = 0; i < op->buffer->shape.size() - 1; i++) {
       if (i < DefaultTextureLayoutSeparator(op->buffer->shape.size(), GetStorageScope(buffer))) {
         col_dims.push_back(op->buffer->shape[i]);
         col_indices.push_back(op->indices[i]);
@@ -216,11 +218,12 @@ class TextureFlattener : public TextureLoweringBase {
   std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_binds_;
 };
 
-
 class ExternalBufferForwarding : public TextureLoweringBase {
  public:
   explicit ExternalBufferForwarding(const Map<Var, Buffer>& extern_buffer_map)
-    : TextureLoweringBase(extern_buffer_map) {;}
+      : TextureLoweringBase(extern_buffer_map) {
+    ;
+  }
 
   Stmt VisitStmt_(const AttrStmtNode* op) final {
     Stmt stmt = TextureLoweringBase::VisitStmt_(op);
@@ -304,12 +307,12 @@ class ExternalBufferForwarding : public TextureLoweringBase {
   std::vector<std::vector<PrimExpr>> external_loads_;
 };
 
-
 PrimFunc TextureFlatten(PrimFunc func) {
   auto fptr = func.CopyOnWrite();
   ExternalBufferForwarding forward(fptr->buffer_map);
   fptr->body = forward(std::move(fptr->body));
-  fptr->body = TextureFlattener(fptr->buffer_map, forward.GetForwardedBuffers())(std::move(fptr->body));
+  fptr->body =
+      TextureFlattener(fptr->buffer_map, forward.GetForwardedBuffers())(std::move(fptr->body));
   return func;
 }
 

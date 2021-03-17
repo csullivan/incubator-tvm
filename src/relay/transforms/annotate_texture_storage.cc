@@ -23,11 +23,11 @@
  *
  */
 
+#include <tvm/relay/attrs/nn.h>
 #include <tvm/relay/expr.h>
 #include <tvm/relay/expr_functor.h>
 #include <tvm/relay/transform.h>
 #include <tvm/tir/expr.h>
-#include <tvm/relay/attrs/nn.h>
 
 #include <memory>
 #include <unordered_map>
@@ -37,12 +37,13 @@ namespace tvm {
 namespace relay {
 namespace {
 
-class StorageInfo : private ExprVisitor{
+class StorageInfo : private ExprVisitor {
  public:
   StorageInfo(const Map<Expr, Integer>& dev_map, const Map<Integer, Target>& target_map)
-    : device_ids_(dev_map), targets_(target_map) {;}
-  static Map<Expr, Array<String>> GetStorageMap(const Expr& expr,
-                                                const Map<Expr, Integer>& dev_map,
+      : device_ids_(dev_map), targets_(target_map) {
+    ;
+  }
+  static Map<Expr, Array<String>> GetStorageMap(const Expr& expr, const Map<Expr, Integer>& dev_map,
                                                 const Map<Integer, Target>& target_map) {
     StorageInfo storage_info(dev_map, target_map);
     storage_info.Visit(expr);
@@ -79,13 +80,9 @@ class StorageInfo : private ExprVisitor{
     }
   }
 
-  void VisitExpr_(const VarNode* vn) final {
-    ApplyConsumerScopeToInputs(vn);
-  }
+  void VisitExpr_(const VarNode* vn) final { ApplyConsumerScopeToInputs(vn); }
 
-  void VisitExpr_(const ConstantNode* cn) final {
-    ApplyConsumerScopeToInputs(cn, "weight");
-  }
+  void VisitExpr_(const ConstantNode* cn) final { ApplyConsumerScopeToInputs(cn, "weight"); }
 
   void VisitExpr_(const CallNode* call) final {
     // Check the contents of this primitive function
@@ -112,7 +109,8 @@ class StorageInfo : private ExprVisitor{
           // Add consumer storage scope information for call arguments
           for (auto& arg : call->args) {
             if (storage_scope_.count(call)) {
-              ICHECK(!HasMixedStorageOutputs(call)) << "Mixed output storage scopes are not currently supported";
+              ICHECK(!HasMixedStorageOutputs(call))
+                  << "Mixed output storage scopes are not currently supported";
               consumer_storage_scopes_[arg.operator->()].push_back(storage_scope_[call][0]);
             } else {
               consumer_storage_scopes_[arg.operator->()].push_back("global");
@@ -137,7 +135,7 @@ class StorageInfo : private ExprVisitor{
     if (consumer_scopes_it != consumer_storage_scopes_.end()) {
       std::string consumer_scope = GetConsumerScope(consumer_scopes_it->second);
       ICHECK(!storage_scope_.count(expr))
-        << "Already propagated consumer scopes to input: " << GetRef<Expr>(expr);
+          << "Already propagated consumer scopes to input: " << GetRef<Expr>(expr);
       storage_scope_[expr].push_back(consumer_scope);
       if (consumer_scope == "texture") {
         if (!scope_suffix.empty()) {
@@ -152,7 +150,8 @@ class StorageInfo : private ExprVisitor{
       const ExprNode* producer = kv.first;
       std::string legal_scope = GetConsumerScope(kv.second);
       if (storage_scope_.count(producer)) {
-        ICHECK(!HasMixedStorageOutputs(producer)) << "Mixed output storage scopes are not currently supported";
+        ICHECK(!HasMixedStorageOutputs(producer))
+            << "Mixed output storage scopes are not currently supported";
         if (storage_scope_[producer][0].find(legal_scope) == std::string::npos) {
           for (size_t i = 0; i < storage_scope_[producer].size(); i++) {
             // Only support uniform storage scope accross all outputs for now
@@ -195,17 +194,22 @@ class StorageInfo : private ExprVisitor{
       dev_id = (*kv).first;
       target = (*kv).second;
     }
-    ICHECK(dev_id->value != -1) << "Error inferring target device, device mapping and targets do not match";
+    ICHECK(dev_id->value != -1)
+        << "Error inferring target device, device mapping and targets do not match";
     Optional<String> t_device = target->GetAttr<String>("device");
     // Currently only `target = opencl --device=adreno` supports texture storage
     if (target->kind->device_type == kDLOpenCL && t_device.defined()) {
-      if (t_device.value() == "adreno") { return true; }
+      if (t_device.value() == "adreno") {
+        return true;
+      }
     }
     return false;
   }
 
   std::string GetConsumerScope(const std::vector<std::string>& consumer_scopes) const {
-    if (!consumer_scopes.size()) { return "global"; }
+    if (!consumer_scopes.size()) {
+      return "global";
+    }
     std::string ref_scope = consumer_scopes[0];
     for (auto& consumer_scope : consumer_scopes) {
       if (consumer_scope != ref_scope) {
@@ -240,8 +244,11 @@ class StorageInfo : private ExprVisitor{
   std::unordered_map<const ExprNode*, std::vector<std::string>> consumer_storage_scopes_;
 };
 
-String GetStorageScope(const Expr& expr, const Map<Expr, runtime::ADT>& storage_map, size_t output_index) {
-  if (!storage_map.count(expr)) { return String{}; }
+String GetStorageScope(const Expr& expr, const Map<Expr, runtime::ADT>& storage_map,
+                       size_t output_index) {
+  if (!storage_map.count(expr)) {
+    return String{};
+  }
   auto storage_info = Downcast<Array<String>>(storage_map[expr][2]);
   if (output_index >= storage_info.size()) {
     return String{};
@@ -253,16 +260,20 @@ String GetStorageScope(const Expr& expr, const Map<Expr, runtime::ADT>& storage_
   }
   return String(scope);
 }
-}
+}  // namespace
 
-Array<tir::Buffer> CollectBufferBinds(const Call& call, const Map<Expr, runtime::ADT>& storage_map) {
+Array<tir::Buffer> CollectBufferBinds(const Call& call,
+                                      const Map<Expr, runtime::ADT>& storage_map) {
   const auto* primfn = call->op.as<FunctionNode>();
   ICHECK(primfn);
-  ICHECK(primfn->HasNonzeroAttr(attr::kPrimitive)) << "Can only collect buffer binds for primitive functions";
-  ICHECK_EQ(call->args.size(), primfn->params.size()) << "Call arguments and function parameters do not match";
+  ICHECK(primfn->HasNonzeroAttr(attr::kPrimitive))
+      << "Can only collect buffer binds for primitive functions";
+  ICHECK_EQ(call->args.size(), primfn->params.size())
+      << "Call arguments and function parameters do not match";
 
-  auto make_buffer = [&storage_map](const Expr& expr, const TensorTypeNode* ttype, const std::string& name, size_t index = 0) {
-    //String scope = GetStorageScope(expr, storage_map, index);
+  auto make_buffer = [&storage_map](const Expr& expr, const TensorTypeNode* ttype,
+                                    const std::string& name, size_t index = 0) {
+    // String scope = GetStorageScope(expr, storage_map, index);
     auto storage_info = Downcast<Array<String>>(storage_map[expr][2]);
     std::string scope = "";
     if (storage_info.size()) {
@@ -270,8 +281,11 @@ Array<tir::Buffer> CollectBufferBinds(const Call& call, const Map<Expr, runtime:
     }
 
     PrimType storage_type(ttype->dtype);
-    tir::Var var = GetStorageScope(expr, storage_map, index) == "texture" ? tir::Var(name, TextureType(storage_type)) : tir::Var(name, PointerType(storage_type));
-    return tir::Buffer(var, ttype->dtype, ttype->shape, Array<PrimExpr>{}, Integer(0), name, scope, -1, 0, tir::BufferType::kDefault);
+    tir::Var var = GetStorageScope(expr, storage_map, index) == "texture"
+                       ? tir::Var(name, TextureType(storage_type))
+                       : tir::Var(name, PointerType(storage_type));
+    return tir::Buffer(var, ttype->dtype, ttype->shape, Array<PrimExpr>{}, Integer(0), name, scope,
+                       -1, 0, tir::BufferType::kDefault);
   };
 
   // Make input buffers
@@ -286,7 +300,8 @@ Array<tir::Buffer> CollectBufferBinds(const Call& call, const Map<Expr, runtime:
       for (size_t j = 0; j < tuple_type->fields.size(); j++) {
         const auto* ttype = tuple_type->fields[j].as<TensorTypeNode>();
         ICHECK(ttype);
-        buffers.push_back(make_buffer(arg, ttype, "placeholder" + std::to_string(i) + "_" + std::to_string(j), j));
+        buffers.push_back(make_buffer(
+            arg, ttype, "placeholder" + std::to_string(i) + "_" + std::to_string(j), j));
       }
     }
   }
@@ -307,15 +322,16 @@ Array<tir::Buffer> CollectBufferBinds(const Call& call, const Map<Expr, runtime:
   return buffers;
 }
 
-Map<Expr, Array<String>> CollectTextureStorage(const Expr& expr,
-                                               const Map<Expr, Integer>& dev_map,
+Map<Expr, Array<String>> CollectTextureStorage(const Expr& expr, const Map<Expr, Integer>& dev_map,
                                                const Map<Integer, Target>& target_map) {
   return StorageInfo::GetStorageMap(expr, dev_map, target_map);
 }
 
-TVM_REGISTER_GLOBAL("relay.backend.opencl.adreno._CollectStorageInfo").set_body_typed(CollectTextureStorage);
+TVM_REGISTER_GLOBAL("relay.backend.opencl.adreno._CollectStorageInfo")
+    .set_body_typed(CollectTextureStorage);
 
-TVM_REGISTER_GLOBAL("relay.backend.opencl.adreno._CollectBufferBinds").set_body_typed(CollectBufferBinds);
+TVM_REGISTER_GLOBAL("relay.backend.opencl.adreno._CollectBufferBinds")
+    .set_body_typed(CollectBufferBinds);
 
 }  // namespace relay
 }  // namespace tvm

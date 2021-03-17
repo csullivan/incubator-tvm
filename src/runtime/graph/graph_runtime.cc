@@ -332,13 +332,13 @@ void GraphRuntime::SetupStorage() {
       pool_entry[sid].shape[0] = std::max(pool_entry[sid].shape[0], shape.height);
       pool_entry[sid].shape[1] = std::max(pool_entry[sid].shape[1], shape.width);
       CHECK(pool_entry[sid].shape[2] == 0 || pool_entry[sid].shape[2] == shape.channel)
-        << pool_entry[sid].shape[2] << " != " << shape.channel
-        << ",  texture channel length must be consistent within a storage pool";
+          << pool_entry[sid].shape[2] << " != " << shape.channel
+          << ",  texture channel length must be consistent within a storage pool";
       pool_entry[sid].shape[2] = shape.channel;
       CHECK(pool_entry[sid].dtype.bits == 0 || TypeEqual(pool_entry[sid].dtype, t))
-        << DLDataType2String(pool_entry[sid].dtype) << " != " << DLDataType2String(t)
-        << ", pool entry for 2d texure allocations must be of the same type;"
-        << " downstream error from memory planner likely";
+          << DLDataType2String(pool_entry[sid].dtype) << " != " << DLDataType2String(t)
+          << ", pool entry for 2d texure allocations must be of the same type;"
+          << " downstream error from memory planner likely";
       pool_entry[sid].dtype = t;
     }
   }

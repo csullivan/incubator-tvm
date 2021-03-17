@@ -73,21 +73,19 @@ TextureType::TextureType(runtime::DataType dtype) {
   data_ = std::move(n);
 }
 
-
 TVM_REGISTER_NODE_TYPE(TextureTypeNode);
 
 TVM_REGISTER_GLOBAL("ir.TextureType").set_body_typed([](Type element_type) {
-    return TextureType(element_type);
+  return TextureType(element_type);
 });
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
     .set_dispatch<TextureTypeNode>([](const ObjectRef& ref, ReprPrinter* p) {
-        auto* node = static_cast<const TextureTypeNode*>(ref.get());
-        p->stream << "texture ";
-        p->Print(node->element_type);
-        p->stream << '*';
+      auto* node = static_cast<const TextureTypeNode*>(ref.get());
+      p->stream << "texture ";
+      p->Print(node->element_type);
+      p->stream << '*';
     });
-
 
 TypeVar::TypeVar(String name, TypeKind kind, Span span) {
   ObjectPtr<TypeVarNode> n = make_object<TypeVarNode>();

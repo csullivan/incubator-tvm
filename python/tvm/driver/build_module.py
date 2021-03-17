@@ -58,7 +58,7 @@ def get_binds(args, compact=False, binds=None):
     """
 
     if isinstance(binds, container.Map):
-        binds = {k : v for (k, v) in binds.items()}
+        binds = {k: v for (k, v) in binds.items()}
     elif isinstance(binds, dict):
         binds = binds.copy()
     elif binds == None:

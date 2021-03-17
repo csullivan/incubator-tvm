@@ -93,6 +93,7 @@ def StorageFlatten(cache_line_size, create_bound_attribute=False):
     """
     return _ffi_api.StorageFlatten(cache_line_size, create_bound_attribute)
 
+
 def TextureFlatten():
     """Flatten the multi-dimensional read/write to 1D.
 

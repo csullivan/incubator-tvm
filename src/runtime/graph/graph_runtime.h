@@ -181,7 +181,6 @@ class TVM_DLL GraphRuntime : public ModuleNode {
   // Memory pool entry.
   struct PoolEntry {
     int device_type;
-    size_t size;
     std::vector<int64_t> shape;
     DLDataType dtype;
     int param_data_entry;

@@ -45,18 +45,26 @@ class CodeGenOpenCL final : public CodeGenC {
   void PrintStorageScope(const std::string& scope, std::ostream& os) final;  // NOLINT(*)
   void PrintStorageSync(const CallNode* op) final;                           // NOLINT(*)
   void PrintType(DataType t, std::ostream& os) final;                        // NOLINT(*)
+  void PrintType(const Type& type, std::ostream& os) final;                  // NOLINT(*)
   std::string GetVecLoad(DataType t, const VarNode* buffer, PrimExpr base) final;
   void PrintVecStore(const VarNode* buffer, DataType t, PrimExpr base,
                      const std::string& value) final;  // NOLINT(*)
   // the address of load/store
   void PrintVecAddr(const VarNode* buffer, DataType t, PrimExpr base,
-                    std::ostream& os);                                        // NOLINT(*)
-  std::string CastFromTo(std::string value, DataType from, DataType target);  // NOLINT(*)
+                    std::ostream& os);                                          // NOLINT(*)
+  void PrintRestrict(const Var& v, std::ostream& os) final;                     // NOLINT(*)
+  std::string CastFromTo(std::string value, DataType from, DataType target);    // NOLINT(*)
+  void SetTextureScope(const std::unordered_map<const VarNode*, std::string>&); // NOLINT(*)
+
 
   // overload visitor
-  void VisitExpr_(const CallNode* op, std::ostream& os) final;       // NOLINT(*)
+  void VisitStmt_(const AllocateNode* op) final;                     // NOLINT(*)
   void VisitExpr_(const BroadcastNode* op, std::ostream& os) final;  // NOLINT(*)
+  void VisitExpr_(const CallNode* op, std::ostream& os) final;       // NOLINT(*)
+  void VisitExpr_(const CastNode* op, std::ostream& os) final;       // NOLINT(*)
   void VisitExpr_(const FloatImmNode* op, std::ostream& os) final;   // NOLINT(*)
+  void VisitStmt_(const StoreNode* op) final;                        // NOLINT(*)
+
 
  private:
   // whether enable fp16 and fp64 extension
@@ -64,6 +72,8 @@ class CodeGenOpenCL final : public CodeGenC {
   bool enable_fp64_{false};
   // Whether to enable atomics extension.
   bool enable_atomics_{false};
+  bool need_texture_ssa_{true};
+  std::unordered_map<const Object*, int32_t> allocation_size_;
 };
 
 }  // namespace codegen

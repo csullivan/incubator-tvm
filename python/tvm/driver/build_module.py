@@ -56,7 +56,13 @@ def get_binds(args, compact=False, binds=None):
     arg_list: list
         The list of symbolic buffers of arguments.
     """
-    binds = {} if binds is None else binds.copy()
+
+    if isinstance(binds, container.Map):
+        binds = {k : v for (k, v) in binds.items()}
+    elif isinstance(binds, dict):
+        binds = binds.copy()
+    elif binds == None:
+        binds = {}
     arg_list = []
     for x in args:
         if isinstance(x, tensor.Tensor):
@@ -169,6 +175,7 @@ def lower(sch, args, name="main", binds=None, simple_mode=False):
     # Phase 1
     pass_list += [
         tvm.tir.transform.InjectPrefetch(),
+        tvm.tir.transform.TextureFlatten(),
         tvm.tir.transform.StorageFlatten(64, instrument_bound_checkers),
         tvm.tir.transform.BF16Legalize(),
         tvm.tir.transform.NarrowDataType(32),

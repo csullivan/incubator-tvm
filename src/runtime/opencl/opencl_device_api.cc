@@ -29,6 +29,26 @@ namespace tvm {
 namespace runtime {
 namespace cl {
 
+namespace {
+std::tuple<size_t, size_t> GetImageInfo(const void* mem_ptr, size_t* origin, size_t* region) {
+  cl_mem mem = static_cast<cl_mem>((void*)mem_ptr);
+  size_t width, height;
+  OPENCL_CALL(clGetImageInfo(mem, CL_IMAGE_WIDTH, sizeof(width), &width, NULL));
+  OPENCL_CALL(clGetImageInfo(mem, CL_IMAGE_HEIGHT, sizeof(height), &height, NULL));
+  // Current support is for image2d only
+  size_t depth = 1;
+  // OPENCL_CALL(clGetImageInfo(mem, CL_IMAGE_DEPTH, sizeof(depth), &depth, NULL));
+  region[0] = width;
+  region[1] = height;
+  region[2] = depth;
+  origin[0] = 0;
+  origin[1] = 0;
+  origin[2] = 0;
+  // return row_pitch == slice_pitch == 0
+  return std::make_tuple(0 , 0);
+}
+}
+
 OpenCLThreadEntry* OpenCLWorkspace::GetThreadEntry() { return OpenCLThreadEntry::ThreadLocal(); }
 
 OpenCLWorkspace* OpenCLWorkspace::Global() {
@@ -126,6 +146,22 @@ void* OpenCLWorkspace::AllocDataSpace(TVMContext ctx, size_t size, size_t alignm
   return mptr;
 }
 
+void* OpenCLWorkspace::AllocDataSpace(TVMContext ctx, int ndim, const int64_t* shape, DLDataType dtype,
+                                      Optional<String> mem_scope) {
+  if (!mem_scope.defined() || mem_scope.value() == "global") {
+    return DeviceAPI::AllocDataSpace(ctx, ndim, shape, dtype, mem_scope);
+  }
+  ICHECK(IsTextureStorage(std::string(mem_scope.value())))
+    << "Device does not support allocate data space with "
+    << "specified memory scope: " << mem_scope.value();
+
+  ICHECK(ndim > 2) << "Shape for texture allocation must be at least rank 3; "
+                   << "provided shape is rank " << ndim;
+  size_t axis = DefaultTextureLayoutSeparator(ndim, mem_scope.value());
+  auto texture = ApplyTexture2DFlattening<int64_t>(shape, ndim, axis);
+  return AllocTexture(ctx, texture.width, texture.height, dtype);
+}
+
 void OpenCLWorkspace::FreeDataSpace(TVMContext ctx, void* ptr) {
   // We have to make sure that the memory object is not in the command queue
   // for some OpenCL platforms.
@@ -133,6 +169,32 @@ void OpenCLWorkspace::FreeDataSpace(TVMContext ctx, void* ptr) {
 
   cl_mem mptr = static_cast<cl_mem>(ptr);
   OPENCL_CALL(clReleaseMemObject(mptr));
+}
+
+void* OpenCLWorkspace::AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) {
+  this->Init();
+  ICHECK(context != nullptr) << "No OpenCL device";
+  cl_int err_code;
+  cl_channel_type cl_type = DTypeToOpenCLChannelType(type_hint);
+  cl_image_format format = { CL_RGBA, cl_type };
+  cl_image_desc descriptor = { CL_MEM_OBJECT_IMAGE2D, width, height, 0, 0, 0, 0, 0, 0 };
+  cl_mem mptr = clCreateImage(
+    this->context,
+    CL_MEM_READ_WRITE,
+    &format,
+    &descriptor,
+    nullptr,
+    &err_code);
+  OPENCL_CHECK_ERROR(err_code);
+  return mptr;
+}
+
+void* OpenCLWorkspace::AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) {
+  return GetThreadEntry()->texture_pool.AllocTexture(ctx, width, height, type_hint);
+}
+
+void OpenCLWorkspace::FreeTextureWorkspace(TVMContext ctx, void* ptr) {
+  GetThreadEntry()->texture_pool.FreeTexture(ctx, ptr);
 }
 
 void OpenCLWorkspace::CopyDataFromTo(const void* from, size_t from_offset, void* to,
@@ -147,15 +209,54 @@ void OpenCLWorkspace::CopyDataFromTo(const void* from, size_t from_offset, void*
                                     static_cast<cl_mem>(to), from_offset, to_offset, size, 0,
                                     nullptr, nullptr));
   } else if (IsOpenCLDevice(ctx_from) && ctx_to.device_type == kDLCPU) {
-    OPENCL_CALL(clEnqueueReadBuffer(this->GetQueue(ctx_from),
-                                    static_cast<cl_mem>((void*)from),  // NOLINT(*)
-                                    CL_FALSE, from_offset, size, static_cast<char*>(to) + to_offset,
-                                    0, nullptr, nullptr));
+    cl_mem_object_type from_type = GetMemObjectType(from);
+    switch (from_type) {
+    case CL_MEM_OBJECT_BUFFER:
+      OPENCL_CALL(clEnqueueReadBuffer(this->GetQueue(ctx_from),
+                                      static_cast<cl_mem>((void*)from),  // NOLINT(*)
+                                      CL_FALSE, from_offset, size, static_cast<char*>(to) + to_offset,
+                                      0, nullptr, nullptr));
+      break;
+    case CL_MEM_OBJECT_IMAGE2D:
+      size_t origin[3], region[3];
+      size_t row_pitch, slice_pitch;
+      std::tie(row_pitch, slice_pitch) = GetImageInfo(from, origin, region);
+      // TODO(csullivan): Support calculating row_pitch correctly in the case of reuse.
+      // Note that when utilizing texture pools for memory reuse, the allocated image
+      // size can be larger than the size to be read.
+      OPENCL_CALL(clEnqueueReadImage(this->GetQueue(ctx_from),
+                                     static_cast<cl_mem>((void*)from),  // NOLINT(*)
+                                     CL_FALSE, origin, region, row_pitch, slice_pitch,
+                                     static_cast<char*>(to) + to_offset,
+                                     0, nullptr, nullptr));
+      break;
+    default:
+      LOG(FATAL) << "Device storage transfer from cl_mem_object_type: " << from_type
+                 << " to host memory is not yet supported";
+    }
     OPENCL_CALL(clFinish(this->GetQueue(ctx_from)));
   } else if (ctx_from.device_type == kDLCPU && IsOpenCLDevice(ctx_to)) {
-    OPENCL_CALL(clEnqueueWriteBuffer(this->GetQueue(ctx_to), static_cast<cl_mem>(to), CL_FALSE,
-                                     to_offset, size, static_cast<const char*>(from) + from_offset,
-                                     0, nullptr, nullptr));
+    cl_mem_object_type to_type = GetMemObjectType(to);
+    switch (to_type) {
+    case CL_MEM_OBJECT_BUFFER:
+      OPENCL_CALL(clEnqueueWriteBuffer(this->GetQueue(ctx_to), static_cast<cl_mem>(to), CL_FALSE,
+                                       to_offset, size, static_cast<const char*>(from) + from_offset,
+                                       0, nullptr, nullptr));
+      break;
+    case CL_MEM_OBJECT_IMAGE2D:
+      size_t origin[3], region[3];
+      size_t row_pitch, slice_pitch;
+      std::tie(row_pitch, slice_pitch) = GetImageInfo(to, origin, region);
+      OPENCL_CALL(clEnqueueWriteImage(this->GetQueue(ctx_to),
+                                      static_cast<cl_mem>((void*)to),  // NOLINT(*)
+                                      CL_FALSE, origin, region, row_pitch, slice_pitch,
+                                      static_cast<const char*>(from) + from_offset,
+                                      0, nullptr, nullptr));
+      break;
+    default:
+      LOG(FATAL) << "Device storage transfer from host memory to cl_mem_object_type: " << to_type
+                 << " is not yet supported";
+    }
     OPENCL_CALL(clFinish(this->GetQueue(ctx_to)));
   } else {
     LOG(FATAL) << "Expect copy from/to OpenCL or between OpenCL";

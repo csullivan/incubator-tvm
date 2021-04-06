@@ -109,8 +109,18 @@ class SimplifyTranspose : public DFPatternRewrite {
       } else if (auto attr = trans_call->attrs.as<LayoutTransformAttrs>()) {
         Layout src_layout(attr->src_layout);
         Layout dst_layout(attr->dst_layout);
+
+        bool rank_contract = src_layout->axes.size() > dst_layout->axes.size();
         for (int i = 0; i < ndim; ++i) {
           attr_axes.push_back(src_layout.IndexOf(dst_layout[i]));
+          // Add subordinate axis of src directly after primal
+          // if it exists in src but not in dst layout (rank contraction)
+          if (rank_contract && dst_layout[i].IsPrimal()) {
+            int32_t sub_index = src_layout.IndexOf(dst_layout[i].ToDual());
+            if (sub_index != -1) {
+              attr_axes.push_back(sub_index);
+            }
+          }
         }
       } else {
         CHECK(false) << "Expected transpose or layout_transform, but got "
@@ -134,6 +144,19 @@ class SimplifyTranspose : public DFPatternRewrite {
     interm_axes.push_back(get_axes_from_call(trans_call, ndim));
     trans_call = Downcast<Call>(trans_call->args[0]);
     interm_axes.push_back(get_axes_from_call(trans_call, ndim));
+
+    // TODO(csullivan): support simplification of rank changing
+    // layout transform and transpose.
+    bool rank_change = false;
+    for (size_t i = 1; i < interm_axes.size(); i++) {
+      if (interm_axes[i - 1].size() != interm_axes[i].size()) {
+        rank_change = true;
+      }
+    }
+
+    if (rank_change) {
+      return trans_call;
+    }
 
     // Calculate the final axes in reverse order (from root to output)
     auto it = interm_axes.rbegin();

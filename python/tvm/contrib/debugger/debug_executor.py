@@ -182,34 +182,7 @@ class GraphModuleDebug(graph_executor.GraphModule):
             for j in range(num_outputs):
                 out_tensor = self._get_output_by_layer(i, j)
                 out_tensor = array(out_tensor)
-                self.debug_datum._output_tensor_list.append(out_tensor)
-
-    def debug_get_output(self, node, out=None):
-        """Run graph up to node and get the output to out
-
-        Parameters
-        ----------
-        node : int / str
-            The node index or name
-
-        out : NDArray
-            The output array container
-        """
-        if isinstance(node, str):
-            output_tensors = self.debug_datum.get_output_tensors()
-            try:
-                out = output_tensors[node]
-            except KeyError:
-                node_list = output_tensors.keys()
-                raise RuntimeError(
-                    "Node " + node + " not found, available nodes are: " + str(node_list) + "."
-                )
-        elif isinstance(node, int):
-            output_tensors = self.debug_datum._output_tensor_list
-            out = output_tensors[node]
-        else:
-            raise RuntimeError("Require node index or name only.")
-        return out
+                self.debug_datum._output_tensor_list.append(out_tensor.shape)
 
     def run(self, **input_dict):
         """Run forward execution of the graph with debug
@@ -225,7 +198,7 @@ class GraphModuleDebug(graph_executor.GraphModule):
         # Step 1. Execute the graph
         self._run_debug()
         # Step 2. Dump the output tensors to the dump folder
-        self.debug_datum.dump_output_tensor()
+        # self.debug_datum.dump_output_tensor()
         # Step 3. Dump the Chrome trace to the dump folder
         self.debug_datum.dump_chrome_trace()
         # Step 4. Display the collected information

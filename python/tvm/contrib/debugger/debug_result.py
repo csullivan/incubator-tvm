@@ -111,38 +111,6 @@ class DebugResult(object):
         """Return the nodes dtype list"""
         return self._dtype_list
 
-    def get_output_tensors(self):
-        """Dump the outputs to a temporary folder, the tensors are in numpy format"""
-        eid = 0
-        order = 0
-        output_tensors = {}
-        for node, time in zip(self._nodes_list, self._time_list):
-            num_outputs = self.get_graph_node_output_num(node)
-            for j in range(num_outputs):
-                order += time[0]
-                key = node["name"] + "_" + str(j)
-                output_tensors[key] = self._output_tensor_list[eid]
-                eid += 1
-        return output_tensors
-
-    def dump_output_tensor(self):
-        """Dump the outputs to a temporary folder, the tensors are in numpy format"""
-        # cleanup existing tensors before dumping
-        self._cleanup_tensors()
-        eid = 0
-        order = 0
-        output_tensors = {}
-        for node, time in zip(self._nodes_list, self._time_list):
-            num_outputs = self.get_graph_node_output_num(node)
-            for j in range(num_outputs):
-                order += time[0]
-                key = node["name"] + "_" + str(j) + "__" + str(order)
-                output_tensors[key] = self._output_tensor_list[eid]
-                eid += 1
-
-        with open(os.path.join(self._dump_path, "output_tensors.params"), "wb") as param_f:
-            param_f.write(save_tensors(output_tensors))
-
     def dump_chrome_trace(self):
         """Dump the trace to the Chrome trace.json format."""
 
@@ -211,7 +179,7 @@ class DebugResult(object):
                     eid += 1
                     continue
                 name = node["name"]
-                shape = str(self._output_tensor_list[eid].shape)
+                shape = str(self._output_tensor_list[eid])
                 time_us = round(time[0] * 1e6, 3)
                 time_percent = round(((time[0] / total_time) * 100), 3)
                 inputs = str(node["attrs"]["num_inputs"])

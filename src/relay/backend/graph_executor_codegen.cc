@@ -49,7 +49,7 @@ using GraphAttrs = std::unordered_map<std::string, dmlc::any>;
 using GraphObjectPtr = std::shared_ptr<GraphNode>;
 using GraphInputObjectPtr = std::shared_ptr<GraphInputNode>;
 using GraphOpObjectPtr = std::shared_ptr<GraphOpNode>;
-using TargetsMap = std::unordered_map<int, Target>;
+using TargetsMap = Map<Integer, Target>;
 
 /*! \brief Lowered outputs */
 struct LoweredOutput {
@@ -191,7 +191,7 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
 
   LoweredOutput Codegen(relay::Function func) {
     auto pf = GetPackedFunc("relay.backend.GraphPlanMemory");
-    storage_device_map_ = (*pf)(func);
+    storage_device_map_ = (*pf)(func, targets_);
     // First we convert all the parameters into input nodes.
     for (auto param : func->params) {
       auto node_ptr = GraphInputNode::make_node_ptr(param->name_hint(), GraphAttrs());
@@ -250,16 +250,22 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     size_t count = storage_device_map_.count(expr);
     ICHECK_GT(count, 0) << "Expr is not existing in storage plan";
     auto storage_device_info = storage_device_map_[expr];
-    ICHECK_EQ(storage_device_info.size(), 2);
+    ICHECK_EQ(storage_device_info.size(), 3);
     // storage
     std::vector<int64_t> storage_info;
-    for (auto& v : storage_device_info[0]) {
+    for (auto& v : Downcast<IntegerArray>(storage_device_info[0])) {
       storage_info.push_back(v->value);
     }
     node->attrs_["storage_id"] = std::move(storage_info);
+    // storage scope
+    std::vector<std::string> storage_scope;
+    for (auto& v : Downcast<Array<String>>(storage_device_info[2])) {
+      storage_scope.push_back(std::string(v));
+    }
+    node->attrs_["storage_scope"] = std::move(storage_scope);
     // type
     std::vector<int64_t> device_types;
-    for (auto& v : storage_device_info[1]) {
+    for (auto& v : Downcast<IntegerArray>(storage_device_info[1])) {
       device_types.push_back(v->value);
     }
     size_t num_unknown_devices = std::count(device_types.begin(), device_types.end(), 0);
@@ -320,7 +326,7 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     auto node = GraphInputNode::make_node_ptr(name, GraphAttrs());
     auto to_return = AddNode(node, expr);
     CHECK_EQ(to_return.size(), 1) << "Expected exactly 1 parameter node created";
-    param_storage_ids_[name] = storage_device_map_[expr][0][0]->value;
+    param_storage_ids_[name] = Downcast<IntegerArray>(storage_device_map_[expr][0])[0]->value;
     params_[name] = op->data;
     return to_return;
   }
@@ -382,7 +388,7 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
 
     ICHECK_GE(storage_device_map_.count(expr), 0);
     auto& device_type = storage_device_map_[expr][1];
-    auto call_dev_type = device_type[0]->value;
+    auto call_dev_type = Downcast<IntegerArray>(device_type)[0]->value;
     // Normal Relay Function
     if (targets_.size() == 1) {
       // homogeneous execution.
@@ -401,8 +407,18 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
       }
       target = targets_[call_dev_type];
     }
-    CCacheKey key = (*pf0)(func, target);
-    CachedFunc lowered_func = (*pf1)(compile_engine_, key);
+
+    Array<tir::Buffer> buffers;
+    std::string ftarget_prefix = "relay.backend." + target->kind->name;
+    if (Optional<String> t_device = target->GetAttr<String>("device")) {
+      ftarget_prefix += ("." + t_device.value());
+    }
+    if (const auto* f = runtime::Registry::Get(ftarget_prefix + "._CollectBufferBinds")) {
+      buffers = (*f)(GetRef<Call>(op), storage_device_map_);
+    }
+
+    CCacheKey key = (*pf0)(func, target, buffers);
+    CachedFunc lowered_func = (*pf1)(compile_engine_, key, buffers);
     if (!lowered_funcs_.count(target->str())) {
       lowered_funcs_[target->str()] = IRModule(Map<GlobalVar, BaseFunc>({}));
     }
@@ -472,12 +488,14 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     size_t num_entry = 0;
     ShapeVector shapes;
     std::vector<size_t> storage_ids;
+    std::vector<std::string> storage_scopes;
     std::vector<size_t> device_types;
     std::vector<std::string> dltypes;
     std::vector<size_t> node_row_ptr{0};
     for (auto node : nodes_) {
       const auto& shape_vec = dmlc::get<ShapeVector>(node->attrs_["shape"]);
       const auto& storage_id = dmlc::get<std::vector<int64_t>>(node->attrs_["storage_id"]);
+      const auto& storage_scope = dmlc::get<std::vector<std::string>>(node->attrs_["storage_scope"]);
       const auto& dtype_vec = dmlc::get<std::vector<std::string>>(node->attrs_["dtype"]);
 
       ICHECK_EQ(node->num_outputs_, shape_vec.size());
@@ -486,6 +504,7 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
       shapes.insert(shapes.end(), shape_vec.begin(), shape_vec.end());
       dltypes.insert(dltypes.end(), dtype_vec.begin(), dtype_vec.end());
       storage_ids.insert(storage_ids.end(), storage_id.begin(), storage_id.end());
+      storage_scopes.insert(storage_scopes.end(), storage_scope.begin(), storage_scope.end());
       if (node->attrs_.count("device_index")) {
         const auto& dev_types = dmlc::get<std::vector<int64_t>>(node->attrs_["device_index"]);
         device_types.insert(device_types.end(), dev_types.begin(), dev_types.end());
@@ -501,6 +520,8 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     attrs["shape"].emplace_back(shapes);
     attrs["storage_id"].emplace_back(std::string("list_int"));
     attrs["storage_id"].emplace_back(storage_ids);
+    attrs["storage_scope"].emplace_back(std::string("list_str"));
+    attrs["storage_scope"].emplace_back(storage_scopes);
     if (device_types.size()) {
       attrs["device_index"].emplace_back(std::string("list_int"));
       attrs["device_index"].emplace_back(device_types);
@@ -548,7 +569,7 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
   std::unordered_map<std::string, runtime::NDArray> params_;
   std::unordered_map<std::string, int64_t> param_storage_ids_;
   /*! \brief plan memory of device result */
-  Map<Expr, Array<IntegerArray>> storage_device_map_;
+  Map<Expr, runtime::ADT> storage_device_map_;
   /*! \brief lowered funcs */
   std::unordered_map<std::string, IRModule> lowered_funcs_;
   /*! \brief name map */
@@ -564,17 +585,11 @@ class GraphExecutorCodegenModule : public runtime::ModuleNode {
     if (name == "init") {
       return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
         ICHECK_EQ(args.num_args, 2) << "The expected of arguments are: "
-                                    << "runtime::Module mod and Map<int, Target> targets";
+                                    << "runtime::Module mod and Map<Integer, Target> targets";
         void* mod = args[0];
-        Map<Integer, tvm::Target> tmp = args[1];
-        TargetsMap targets;
-        for (const auto& it : tmp) {
-          auto dev_type = it.first.as<tir::IntImmNode>();
-          ICHECK(dev_type);
-          targets[dev_type->value] = it.second;
-        }
-        codegen_ = std::make_shared<GraphExecutorCodegen>(reinterpret_cast<runtime::Module*>(mod),
-                                                          targets);
+        TargetsMap targets =  args[1];
+        codegen_ =
+            std::make_shared<GraphExecutorCodegen>(reinterpret_cast<runtime::Module*>(mod), targets);
       });
     } else if (name == "codegen") {
       return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {

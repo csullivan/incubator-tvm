@@ -64,10 +64,11 @@ LoweredOutput::LoweredOutput(tvm::Array<te::Tensor> outputs, OpImplementation im
   data_ = std::move(n);
 }
 
-CCacheKey::CCacheKey(Function source_func, Target target) {
+CCacheKey::CCacheKey(Function source_func, Target target, Array<tir::Buffer> buffers) {
   auto n = make_object<CCacheKeyNode>();
   n->source_func = std::move(source_func);
   n->target = std::move(target);
+  n->buffers = std::move(buffers);
   data_ = std::move(n);
 }
 
@@ -612,11 +613,12 @@ class MakeShapeFunc : public backend::MemoizedExprTranslator<Array<te::Tensor>> 
 class CompileEngineImpl : public CompileEngineNode {
  public:
   // Lower the function.
-  CachedFunc Lower(const CCacheKey& key) { return LowerInternal(key)->cached_func; }
+  CachedFunc Lower(const CCacheKey& key, const Array<tir::Buffer>& buffers) {
+    return LowerInternal(key, buffers)->cached_func; }
 
   // For now, build one module per function.
-  PackedFunc JIT(const CCacheKey& key) final {
-    CCacheValue value = LowerInternal(key);
+  PackedFunc JIT(const CCacheKey& key, const Array<tir::Buffer>& buffers) final {
+    CCacheValue value = LowerInternal(key, buffers);
     if (value->packed_func != nullptr) return value->packed_func;
     // build the function.
     tvm::runtime::Module m;
@@ -711,7 +713,7 @@ class CompileEngineImpl : public CompileEngineNode {
 
  private:
   // implement lowered func
-  CCacheValue LowerInternal(const CCacheKey& key) {
+  CCacheValue LowerInternal(const CCacheKey& key, const Array<tir::Buffer>& buffers = {}) {
     std::lock_guard<std::mutex> lock(mutex_);
     CCacheValue value;
     auto it = cache_.find(key);
@@ -762,9 +764,19 @@ class CompileEngineImpl : public CompileEngineNode {
     for (te::Tensor arg : cache_node->outputs) {
       all_args.push_back(arg);
     }
+
+    // build the bind map
+    Map<te::Tensor, tir::Buffer> binds;
+    if (buffers.size() == all_args.size()) {
+      for (size_t i = 0; i < all_args.size(); i++) {
+        auto& arg = all_args[i];
+        binds.Set(arg, buffers[i]);
+      }
+    }
+
     // lower the function
     if (const auto* f = runtime::Registry::Get("relay.backend.lower")) {
-      cache_node->funcs = (*f)(cfunc->schedule, all_args, cache_node->func_name, key->source_func);
+      cache_node->funcs = (*f)(cfunc->schedule, all_args, cache_node->func_name, key->source_func, binds);
     } else {
       using tvm::transform::PassContext;
       With<PassContext> fresh_pass_ctx_scope(PassContext::Create());
@@ -863,8 +875,8 @@ TVM_REGISTER_GLOBAL("relay.backend._make_LoweredOutput")
     });
 
 TVM_REGISTER_GLOBAL("relay.backend._make_CCacheKey")
-    .set_body_typed([](Function source_func, Target target) {
-      return CCacheKey(source_func, target);
+    .set_body_typed([](Function source_func, Target target, Array<tir::Buffer> buffers = {}) {
+      return CCacheKey(source_func, target, buffers);
     });
 
 TVM_REGISTER_GLOBAL("relay.backend._CompileEngineGlobal").set_body_typed([]() {
@@ -876,7 +888,7 @@ TVM_REGISTER_GLOBAL("relay.backend._CompileEngineClear").set_body_typed([](Compi
 });
 
 TVM_REGISTER_GLOBAL("relay.backend._CompileEngineLower")
-    .set_body_typed([](CompileEngine self, CCacheKey key) { return self->Lower(key); });
+    .set_body_typed([](CompileEngine self, CCacheKey key, Array<tir::Buffer> buffers) { return self->Lower(key, buffers); });
 
 TVM_REGISTER_GLOBAL("relay.backend._CompileEngineLowerShapeFunc")
     .set_body_typed([](CompileEngine self, CCacheKey key) { return self->LowerShapeFunc(key); });

@@ -150,7 +150,7 @@ def compute_conv2d_NCHWc_KCRSk(Input, Filter, stride, padding, dilation, out_dty
             ),
             tag="conv2d_nchwc",
         )
-    return te.compute(conv.shape, lambda n,fc,y,x,fb: conv[n,fc,y,x,fb].astype("float16"), tag="cast_from_acc" + args["accumulator"][-2:])
+    return te.compute(conv.shape, lambda n,fc,y,x,fb: conv[n,fc,y,x,fb].astype(out_dtype), tag="cast_from_acc" + args["accumulator"][-2:])
 
 def schedule_conv2d_NCHWc_KCRSk(cfg, s, output, args={}):
     """schedule optimized for batch size = 1"""
@@ -377,7 +377,7 @@ def compute_depthwise_conv2d_NCHWc_KCRSk(Input, Filter, stride, padding, dilatio
             ),
             tag="depthwise_conv2d_nchwc_kcrsk",
         )
-    return te.compute(conv.shape, lambda n,ffc,y,x,ffb: conv[n,ffc,y,x,ffb].astype("float16"), tag="cast_from_acc" + args["accumulator"][-2:])
+    return te.compute(conv.shape, lambda n,ffc,y,x,ffb: conv[n,ffc,y,x,ffb].astype(out_dtype), tag="cast_from_acc" + args["accumulator"][-2:])
 
 def schedule_depthwise_conv2d_NCHWc_KCRSk(cfg, s, output, args={}):
     """schedule optimized for batch size = 1"""

@@ -60,15 +60,6 @@ class StorageInfo : private ExprVisitor{
     StorageInfo storage_info(dev_map, target_map);
     storage_info.Visit(expr);
     storage_info.LegalizeProducerStorage();
-    // TODO(csullivan): The below can be removed if either of the following are true:
-    //   * Function outputs are persistent (can_realloc = False)
-    //   * Runtime support is added for passing tensor shape through CopyFromTo API
-    //     so that image pitch can be determined allowing the correct read to be
-    //     enqueued from a texture pool.
-    // For now we force write to global for the outputs of the function over which
-    // memory planning will be performed. This should incur only a trivial change
-    // in performance.
-    storage_info.ForceGlobalOutputStorage(expr);
     Map<Expr, Array<String>> storage_map;
     for (auto& kv : storage_info.storage_scope_) {
       std::vector<String> storage_scopes;

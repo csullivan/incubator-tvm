@@ -100,7 +100,7 @@ class StorageInfo : private ExprVisitor{
           Visit(call->op);
           if (primitive_supports_texture_) {
             if (call->checked_type().as<TensorTypeNode>()) {
-              storage_scope_[call].push_back("texture");
+              storage_scope_[call].push_back("global.texture");
             } else {
               const auto* tuple_type = call->type_as<TupleTypeNode>();
               ICHECK(tuple_type);
@@ -109,7 +109,7 @@ class StorageInfo : private ExprVisitor{
               // primitive function are assumed to be of the same storage
               // type. This should be easy to extend in the future.
               for (size_t i = 0; i < tuple_type->fields.size(); i++) {
-                storage_scope_[call].push_back("texture");
+                storage_scope_[call].push_back("global.texture");
               }
             }
           }
@@ -150,12 +150,12 @@ class StorageInfo : private ExprVisitor{
 
       // Only propagate texture scope from consumers to input expr if
       // the input shape of the input expr is rgba vectorizable.
-      if (consumer_scope == "texture") {
+      if (consumer_scope == "global.texture") {
         if (expr_is_rgba_vectorizable) {
           std::string scope = consumer_scope;
           // Apply any provided storage scope suffix before assignment
           if (!scope_suffix.empty()) {
-            scope += (":" + scope_suffix);
+            scope += ("-" + scope_suffix);
           }
           storage_scope_[expr].push_back(scope);
         }
@@ -276,7 +276,7 @@ String GetStorageScope(const Expr& expr, const Map<Expr, runtime::ADT>& storage_
     return String{};
   }
   std::string scope = storage_info[output_index];
-  auto pos = scope.find(":");
+  auto pos = scope.find("-");
   if (pos != std::string::npos) {
     scope = scope.substr(0, pos);
   }
@@ -299,7 +299,7 @@ Array<tir::Buffer> CollectBufferBinds(const Call& call, const Map<Expr, runtime:
     }
 
     PrimType storage_type(ttype->dtype);
-    tir::Var var = GetStorageScope(expr, storage_map, index) == "texture" ? tir::Var(name, TextureType(storage_type)) : tir::Var(name, PointerType(storage_type));
+    tir::Var var = GetStorageScope(expr, storage_map, index) == "global.texture" ? tir::Var(name, TextureType(storage_type)) : tir::Var(name, PointerType(storage_type));
     return tir::Buffer(var, ttype->dtype, ttype->shape, Array<PrimExpr>{}, Integer(0), name, scope, -1, 0, tir::BufferType::kDefault);
   };
 

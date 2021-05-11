@@ -765,7 +765,7 @@ Doc TVMScriptPrinter::VisitType_(const PrimTypeNode* node) {
 
 Doc TVMScriptPrinter::VisitType_(const PointerTypeNode* node) {
   Doc doc;
-  doc << "ty.Ptr[" << Print(node->element_type) << "]";
+  doc << "ty.Ptr[" << node->storage_scope << " " << Print(node->element_type) << "]";
   return doc;
 }
 

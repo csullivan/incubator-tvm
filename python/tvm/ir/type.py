@@ -73,8 +73,8 @@ class PointerType(Type):
         The type of pointer's element.
     """
 
-    def __init__(self, element_type):
-        self.__init_handle_by_constructor__(_ffi_api.PointerType, element_type)
+    def __init__(self, element_type, storage_scope="global"):
+        self.__init_handle_by_constructor__(_ffi_api.PointerType, element_type, storage_scope)
 
 
 @tvm._ffi.register_object("TypeVar")

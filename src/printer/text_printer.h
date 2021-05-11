@@ -323,7 +323,6 @@ class TIRTextPrinter : public StmtFunctor<Doc(const Stmt&)>,
 
   Doc VisitType_(const PrimTypeNode* node) override;
   Doc VisitType_(const PointerTypeNode* node) override;
-  Doc VisitType_(const TextureTypeNode* node) override;
   Doc VisitType_(const TupleTypeNode* node) override;
 
   Doc PrintIRModule(const IRModule& module);

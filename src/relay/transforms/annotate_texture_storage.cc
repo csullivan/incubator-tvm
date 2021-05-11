@@ -284,6 +284,7 @@ String GetStorageScope(const Expr& expr, const Map<Expr, runtime::ADT>& storage_
   if (output_index >= storage_info.size()) {
     return String{};
   }
+  ICHECK_LT(output_index, storage_info.size()) << "Output index must be in range of the storage_info of the Expr";
   std::string scope = storage_info[output_index];
   auto pos = scope.find(":");
   if (pos != std::string::npos) {
@@ -308,7 +309,7 @@ Array<tir::Buffer> CollectBufferBinds(const Call& call, const Map<Expr, runtime:
     }
 
     PrimType storage_type(ttype->dtype);
-    tir::Var var = GetStorageScope(expr, storage_map, index) == "texture" ? tir::Var(name, TextureType(storage_type)) : tir::Var(name, PointerType(storage_type));
+    tir::Var var = GetStorageScope(expr, storage_map, index) == "global.texture" ? tir::Var(name, PointerType(storage_type, scope)) : tir::Var(name, PointerType(storage_type));
     return tir::Buffer(var, ttype->dtype, ttype->shape, Array<PrimExpr>{}, Integer(0), name, scope, -1, 0, tir::BufferType::kDefault);
   };
 

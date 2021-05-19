@@ -262,7 +262,7 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
         num_nodes++;
         storage_ids.push_back(tok->storage_id);
         device_types.push_back(tok->device_type);
-        sid_sizes_byte.push_back(GetMemorySize(tok));
+        sid_sizes_byte.push_back(TokenAllocator1D::GetMemorySize(tok));
         storage_scopes.push_back(tok->storage_scope);
       }
       std::vector<ObjectRef> fields{Array<Integer>{storage_ids}, Array<Integer>{device_types}, Array<Integer>{sid_sizes_byte}, Array<String>{storage_scopes}};
@@ -453,7 +453,7 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
      * \param prototype The prototype token.
      * \return The required memory size.
      */
-    size_t GetMemorySize(StorageToken* prototype) {
+    static size_t GetMemorySize(StorageToken* prototype) {
       const TensorTypeNode* ttype = prototype->ttype;
       ICHECK(ttype != nullptr);
       size_t size = 1;
@@ -587,6 +587,7 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
       return Is2DStorage(tok) ? token_2d_.CheckForRelease(tok) : token_1d_.CheckForRelease(tok);
     }
     static bool Is2DStorage(StorageToken* tok) { return relay::Is2DStorage(tok->storage_scope); }
+
 
   private:
     int64_t storage_ids_{0};

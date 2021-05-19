@@ -363,7 +363,7 @@ void GraphExecutor::SetupStorage() {
         shape[0] = (shape[0] + 3) / 4;
       }
       Optional<String> mem_scope = String(pit.scope);
-      storage_pool_.push_back(NDArray::Empty(shape, pit.dtype, ctx, mem_scope));
+      storage_pool_.push_back(NDArray::Empty(shape, pit.dtype, dev, mem_scope));
     }
   }
 

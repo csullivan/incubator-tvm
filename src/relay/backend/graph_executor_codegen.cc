@@ -199,8 +199,8 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
 
     // Initialize the maps to zero
     for (const auto& kv : storage_device_map_) {
-      auto sids = kv.second[0];
-      auto devices = kv.second[1];
+      auto sids = Downcast<IntegerArray>(kv.second[0]);
+      auto devices = Downcast<IntegerArray>(kv.second[1]);
       CHECK_EQ(sids.size(), devices.size());
       for (uint32_t i = 0; i < sids.size(); i++) {
         sid_workspace[devices[i]][sids[i]] = 0;
@@ -212,8 +212,8 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     // Collect sizes of tensors
     for (const auto& kv : storage_device_map_) {
       auto size_bytes = CalculateRelayExprSizeBytes(kv.first->checked_type());
-      auto sids = kv.second[0];
-      auto devices = kv.second[1];
+      auto sids = Downcast<IntegerArray>(kv.second[0]);
+      auto devices = Downcast<IntegerArray>(kv.second[1]);
       if (kv.first->IsInstance<ConstantNode>()) {
         for (const auto& dev : devices) {
           device_consts[dev] += size_bytes;
@@ -342,7 +342,7 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     node->attrs_["storage_id"] = std::move(storage_info);
     // storage scope
     std::vector<std::string> storage_scope;
-    for (auto& v : Downcast<Array<String>>(storage_device_info[2])) {
+    for (auto& v : Downcast<Array<String>>(storage_device_info[3])) {
       storage_scope.push_back(std::string(v));
     }
     node->attrs_["storage_scope"] = std::move(storage_scope);
@@ -443,8 +443,8 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     auto rit = storage_device_map_.find(rhs);
     ICHECK(lit != storage_device_map_.end());
     ICHECK(rit != storage_device_map_.end());
-    int64_t lhs_storage_id = ((*lit).second)[0][0]->value;
-    int64_t rhs_storage_id = ((*rit).second)[0][0]->value;
+    int64_t lhs_storage_id = Downcast<IntegerArray>((*lit).second[0])[0]->value;
+    int64_t rhs_storage_id = Downcast<IntegerArray>((*rit).second[0])[0]->value;
     return lhs_storage_id == rhs_storage_id;
   }
 

@@ -280,7 +280,7 @@ class StorageInfo : private ExprVisitor{
 
 String GetStorageScope(const Expr& expr, const Map<Expr, runtime::ADT>& storage_map, size_t output_index) {
   if (!storage_map.count(expr)) { return String{}; }
-  auto storage_info = Downcast<Array<String>>(storage_map[expr][2]);
+  auto storage_info = Downcast<Array<String>>(storage_map[expr][3]);
   if (output_index >= storage_info.size()) {
     return String{};
   }
@@ -301,7 +301,7 @@ Array<tir::Buffer> CollectBufferBinds(const Call& call, const Map<Expr, runtime:
 
   auto make_buffer = [&storage_map](const Expr& expr, const TensorTypeNode* ttype, const std::string& name, size_t index = 0) {
     //String scope = GetStorageScope(expr, storage_map, index);
-    auto storage_info = Downcast<Array<String>>(storage_map[expr][2]);
+    auto storage_info = Downcast<Array<String>>(storage_map[expr][3]);
     std::string scope = "";
     if (storage_info.size()) {
       scope = storage_info[index];

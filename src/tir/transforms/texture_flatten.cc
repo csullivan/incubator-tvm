@@ -124,7 +124,9 @@ class TextureFlattener : public TextureLoweringBase {
       return this->VisitStmt(op->body);
     }
 
-    Var buffer_var(op->buffer->data->name_hint, TextureType(op->buffer->dtype));
+
+    std::string storage_scope = GetStorageScope(op->buffer);
+    Var buffer_var(op->buffer->data->name_hint, PointerType(PrimType(op->buffer->dtype), String(storage_scope)));
     let_binding_.insert({op->buffer->data, buffer_var});
 
     Stmt stmt = StmtExprMutator::VisitStmt_(op);

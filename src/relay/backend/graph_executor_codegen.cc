@@ -333,7 +333,7 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     size_t count = storage_device_map_.count(expr);
     ICHECK_GT(count, 0) << "Expr is not existing in storage plan";
     auto storage_device_info = storage_device_map_[expr];
-    ICHECK_EQ(storage_device_info.size(), 3);
+    ICHECK_EQ(storage_device_info.size(), 4);
     // storage
     std::vector<int64_t> storage_info;
     for (auto& v : Downcast<IntegerArray>(storage_device_info[0])) {

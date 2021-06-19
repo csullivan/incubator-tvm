@@ -431,6 +431,15 @@ TVM_DLL Pass LegalizePackedCalls();
  */
 TVM_DLL Pass FlattenBuffer();
 
+/*!
+ * \brief Flatten the multi-dimensional read/write
+ *  to two dimensional texture Load/Store and realize
+ *  texture buffer allocations.
+ *
+ * \return The Pass
+ */
+TVM_DLL Pass TextureFlatten();
+
 }  // namespace transform
 }  // namespace tir
 }  // namespace tvm

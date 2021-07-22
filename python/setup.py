@@ -41,7 +41,7 @@ CONDA_BUILD = os.getenv("CONDA_BUILD") is not None
 def get_lib_path():
     """Get library path, name and version"""
     # We can not import `libinfo.py` in setup.py directly since __init__.py
-    # Will be invoked which introduces dependences
+    # Will be invoked which introduces dependencies
     libinfo_py = os.path.join(CURRENT_DIR, "./tvm/_ffi/libinfo.py")
     libinfo = {"__file__": libinfo_py}
     exec(compile(open(libinfo_py, "rb").read(), libinfo_py, "exec"), libinfo, libinfo)
@@ -94,7 +94,7 @@ def config_cython():
             subdir = "_cy2"
         ret = []
         path = "tvm/_ffi/_cython"
-        extra_compile_args = ["-std=c++14"]
+        extra_compile_args = ["-std=c++14", "-DDMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>"]
         if os.name == "nt":
             library_dirs = ["tvm", "../build/Release", "../build"]
             libraries = ["tvm"]

@@ -47,8 +47,15 @@ def schedule_softmax(outs):
         expsum = softmax.op.input_tensors[1]
         exp = softmax.op.input_tensors[0]
         max_elem = s[exp].op.input_tensors[1]
+        delta = None
+    elif op_tag == "fast_softmax_output":
+        expsum = softmax.op.input_tensors[1]
+        exp = softmax.op.input_tensors[0]
+        delta = s[exp].op.input_tensors[0]
+        max_elem = s[delta].op.input_tensors[1]
     elif op_tag == "log_softmax_output":
         exp = None
+        delta = None
         max_elem = softmax.op.input_tensors[1]
         expsum = softmax.op.input_tensors[2]
     else:
@@ -73,6 +80,8 @@ def schedule_softmax(outs):
 
     if len(softmax.shape) > 2:
         ops = [max_elem.op, expsum.op, softmax.op]
+        if delta is not None:
+            ops.append(delta.op)
         if exp is not None:
             ops.append(exp.op)
 
@@ -99,7 +108,10 @@ def schedule_softmax(outs):
         s[expsum].compute_at(s[softmax], xo)
 
         # (2) exp
-        if exp is not None:
+        if delta is not None:
+            s[exp].compute_inline()
+            s[delta].compute_inline()
+        elif exp is not None:
             xo, xi = s[exp].split(exp.op.axis[1], nparts=num_thread)
             _, xii = s[exp].split(xi, factor=4)
             s[exp].vectorize(xii)
@@ -112,7 +124,7 @@ def schedule_softmax(outs):
         k = max_elem.op.reduce_axis[0]
         ko, _ = s[max_elem].split(k, nparts=num_thread)
         s[max_elem].bind(ko, thread_x)
-        if exp is not None:
+        if exp is not None and delta is None:
             s[max_elem].compute_at(s[exp], xo)
         else:
             s[max_elem].bind(ko, thread_x)
@@ -123,7 +135,10 @@ def schedule_softmax(outs):
         block_x = te.thread_axis("blockIdx.x")
         thread_x = te.thread_axis((0, num_thread), "threadIdx.x")
 
-        if exp is not None:
+        if delta is not None:
+            s[exp].compute_inline()
+            s[delta].compute_inline()
+        elif exp is not None:
             s[exp].bind(exp.op.axis[0], block_x)
 
         s[max_elem].bind(max_elem.op.axis[0], block_x)
@@ -148,4 +163,14 @@ def softmax_cudnn(x, axis=-1):
 
 def schedule_softmax_cudnn(outs):
     """Schedule for softmax cudnn op"""
+    return generic.schedule_extern(outs)
+
+
+def log_softmax_cudnn(x, axis=-1):
+    """Perform log_softmax on the data using cudnn"""
+    return cudnn.log_softmax(x, axis)
+
+
+def schedule_log_softmax_cudnn(outs):
+    """Schedule for log_softmax cudnn op"""
     return generic.schedule_extern(outs)

@@ -25,7 +25,7 @@
 #define TVM_RUNTIME_DATA_TYPE_H_
 
 #include <tvm/runtime/c_runtime_api.h>
-#include <tvm/support/logging.h>
+#include <tvm/runtime/logging.h>
 
 #include <string>
 #include <type_traits>
@@ -389,4 +389,19 @@ inline DLDataType String2DLDataType(std::string s) {
 using DataType = runtime::DataType;
 
 }  // namespace tvm
+
+namespace std {
+template <>
+struct hash<tvm::DataType> {
+  inline int cantor_pairing_function(int a, int b) const { return (a + b) * (a + b + 1) / 2 + b; }
+  std::size_t operator()(tvm::DataType const& dtype) const {
+    int a = dtype.code();
+    int b = dtype.bits();
+    int c = dtype.lanes();
+    int d = cantor_pairing_function(a, b);
+    return cantor_pairing_function(c, d);
+  }
+};
+}  // namespace std
+
 #endif  //  TVM_RUNTIME_DATA_TYPE_H_

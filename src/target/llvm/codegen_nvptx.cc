@@ -59,8 +59,8 @@ class CodeGenNVPTX : public CodeGenLLVM {
     if (info.alignment > 16) {
       info.alignment = 16;
     }
-
-    if (info.scope.rank == runtime::StorageRank::kLocal) {
+    auto storage_scope = runtime::StorageScope::Create(GetPtrStorageScope(op->buffer_var));
+    if (storage_scope.rank == runtime::StorageRank::kLocal) {
       // const int local_address_space = 5;
       // TODO(tqchen): for higher version of LLVM, local address space can be set.
       llvm::AllocaInst* alloca = WithFunctionEntry([&]() {
@@ -75,7 +75,7 @@ class CodeGenNVPTX : public CodeGenLLVM {
       }
       buf = alloca;
     } else {
-      ICHECK(info.scope.rank == runtime::StorageRank::kShared)
+      ICHECK(storage_scope.rank == runtime::StorageRank::kShared)
           << "Can only allocate shared or local memory inside kernel";
       // Shared memory: address space  == 3
       const unsigned shared_address_space = 3;
@@ -239,8 +239,7 @@ llvm::Value* CodeGenNVPTX::CreateIntrinsic(const CallNode* op) {
     if (op->args[1]->dtype.is_float()) {
 #if TVM_LLVM_VERSION >= 90
 #if TVM_LLVM_VERSION >= 130
-      return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::FAdd, v0, v1,
-                                       llvm::MaybeAlign::MaybeAlign(),
+      return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::FAdd, v0, v1, llvm::MaybeAlign(),
                                        llvm::AtomicOrdering::Monotonic);
 #else
       return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::FAdd, v0, v1,
@@ -251,8 +250,7 @@ llvm::Value* CodeGenNVPTX::CreateIntrinsic(const CallNode* op) {
 #endif
     }
 #if TVM_LLVM_VERSION >= 130
-    return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::Add, v0, v1,
-                                     llvm::MaybeAlign::MaybeAlign(),
+    return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::Add, v0, v1, llvm::MaybeAlign(),
                                      llvm::AtomicOrdering::Monotonic);
 #else
     return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::Add, v0, v1,

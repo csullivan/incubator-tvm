@@ -20,18 +20,23 @@
 /*!
  * \file relay/backend/graph_plan_memory.cc
  * \brief Memory index assignment pass for executing
- *   the program in the graph runtime.
+ *   the program in the graph executor.
  */
 #include <tvm/relay/analysis.h>
+#include <tvm/relay/attrs/annotation.h>
 #include <tvm/relay/expr.h>
 #include <tvm/relay/expr_functor.h>
+#include <tvm/relay/transform.h>
 #include <tvm/tir/op.h>
 
 #include "../../support/arena.h"
+#include "./utils.h"
 
 namespace tvm {
 namespace relay {
 
+using backend::StaticMemoryPlan;
+using backend::StorageInfo;
 using IntegerArray = Array<Integer>;
 
 struct StorageToken {
@@ -42,11 +47,23 @@ struct StorageToken {
   /*! \brief The corresponding tensor type node. */
   const TensorTypeNode* ttype{nullptr};
   /*! \brief virtual device index that corresponds to the device_type in
-   * DLContext. */
+   * DLDevice. */
   int device_type{0};
   /*! \brief The storage id */
   int64_t storage_id{-1};
 };
+
+std::ostream& operator<<(std::ostream& os, StorageToken tok) {
+  return os << "StorageToken: " << std::endl
+            << "ref_counter: " << tok.ref_counter << std::endl
+            << "max_bytes: " << tok.max_bytes << std::endl
+            << "tttype: " << tok.ttype
+            << std::endl
+            // ok idk how to print this properly
+            << "tttype shape: " << tok.ttype->shape << std::endl
+            << "device_type: " << tok.device_type << std::endl
+            << "storage_id: " << tok.storage_id << std::endl;
+}
 
 class StorageAllocaBaseVisitor : public ExprVisitor {
  public:
@@ -114,7 +131,8 @@ class StorageAllocaBaseVisitor : public ExprVisitor {
   const std::vector<StorageToken*>& GetToken(const Expr& expr) {
     this->VisitExpr(expr);
     auto it = token_map_.find(expr.operator->());
-    ICHECK(it != token_map_.end());
+    ICHECK(it != token_map_.end())
+        << "Expression: `" << PrettyPrint(expr) << "` not found in storage map.";
     return it->second;
   }
   /*!
@@ -168,6 +186,7 @@ class StorageAllocaInit : protected StorageAllocaBaseVisitor {
   void VisitExpr_(const CallNode* op) final {
     // create token for the call node.
     CreateToken(op, true);
+
     // for each input, visit argument token.
     for (Expr arg : op->args) {
       for (StorageToken* tok : GetToken(arg)) {
@@ -196,28 +215,32 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
   }
 
   // Run storage allocation for a function.
-  Map<Expr, Array<IntegerArray> > Plan(const Function& func) {
+  StaticMemoryPlan Plan(const Function& func) {
     prototype_ = StorageAllocaInit(&arena_).GetInitTokenMap(func);
     this->Run(func);
 
     // The value of smap contains two integer arrays where the first array
     // contains the planned storage ids and the second holds the device types.
-    Map<Expr, Array<IntegerArray> > smap;
+    Map<Expr, backend::StorageInfo> smap;
     int num_annotated_nodes = 0;
     int num_nodes = 0;
 
     for (const auto& kv : token_map_) {
-      std::vector<Integer> storage_ids;
-      std::vector<Integer> device_types;
+      std::vector<int64_t> storage_ids;
+      std::vector<DLDeviceType> device_types;
+      std::vector<int64_t> sid_sizes_byte;
+
       for (StorageToken* tok : kv.second) {
         if (tok->device_type) {
           num_annotated_nodes++;
         }
         num_nodes++;
         storage_ids.push_back(tok->storage_id);
-        device_types.push_back(tok->device_type);
+        device_types.push_back(static_cast<DLDeviceType>(tok->device_type));
+        sid_sizes_byte.push_back(GetMemorySize(tok));
       }
-      smap.Set(GetRef<Expr>(kv.first), Array<IntegerArray>({storage_ids, device_types}));
+      auto storage_info = backend::StorageInfo(storage_ids, device_types, sid_sizes_byte);
+      smap.Set(GetRef<Expr>(kv.first), storage_info);
     }
     // Either all or none of the nodes should be annotated.
     if (num_annotated_nodes != 0 && num_annotated_nodes != num_nodes) {
@@ -225,7 +248,8 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
                  << "expressions are assigned with virtual device types. Either all "
                     "or none of the expressions are expected to be annotated.";
     }
-    return smap;
+
+    return backend::StaticMemoryPlan(smap);
   }
 
  protected:
@@ -236,6 +260,7 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
     auto it = prototype_.find(op);
     ICHECK(it != prototype_.end());
     std::vector<StorageToken*> tokens;
+
     for (StorageToken* tok : it->second) {
       if (can_realloc) {
         tokens.push_back(Request(tok));
@@ -250,6 +275,22 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
     }
     token_map_[op] = tokens;
   }
+  // Mark op to reuse the input_token
+  // tie the two memories together
+  void ReuseInputToken(const ExprNode* op, StorageToken* input_token) {
+    ICHECK(!token_map_.count(op));
+    auto it = prototype_.find(op);
+    ICHECK(it != prototype_.end());
+    ICHECK_EQ(it->second.size(), 1U);
+    StorageToken* prototype = it->second[0];
+    // add the reference counter of the output
+    // so the input token can only be deleted after references
+    // to both are expired
+    input_token->ref_counter += prototype->ref_counter;
+    // reuse the input token
+    token_map_[op] = {input_token};
+  }
+
   // The call map
   void VisitExpr_(const CallNode* op) final {
     std::vector<StorageToken*> args;
@@ -259,8 +300,27 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
         args.push_back(tok);
       }
     }
-    // create token for the call node.
-    CreateToken(op, true);
+
+    // Under the flat-memory setting.
+    // we can force aliasing the input and output of reshape
+    // to make it an nop. Note that this is not true
+    // for non-flat memory case. Given the current graph plan memory
+    // only works for flat memory case, we will go with this choice
+    //
+    // TODO(tvm-team) Update checks of flat memory enablement when we support
+    // opaque-nd memory planning to skip this path.
+    if (IsReshape(op)) {
+      // TODO(@electriclilies, jroesch): This check is failing because the size of args is 3
+      // I can't figure out where the extra args are coming from, I assume it must be related
+      // to the relay_attrs field we added to the TIRCallArgs, but I don't know where / how
+      // that's happening...
+      ICHECK_EQ(args.size(), 1U);
+      ReuseInputToken(op, args[0]);
+    } else {
+      // create token for the call node.
+      CreateToken(op, true);
+    }
+
     // check if there is orphaned output that can be released immediately.
     for (StorageToken* tok : token_map_.at(op)) {
       CheckForRelease(tok);
@@ -277,6 +337,26 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
    */
   static size_t DivRoundUp(size_t size, size_t word_size) {
     return (size + word_size - 1) / word_size;
+  }
+  /*!
+   * \brief The call is an reshape only op
+   * \param call The call to be checked.
+   * \return the check result.
+   */
+  static bool IsReshape(const CallNode* call) {
+    if (const auto* fn = call->op.as<FunctionNode>()) {
+      return fn->HasNonzeroAttr(attr::kReshapeOnly);
+    }
+
+    if (call->attrs.defined()) {
+      if (auto tir_call_attrs = call->attrs.as<TIRCallAttrs>()) {
+        Map<String, ObjectRef> metadata = tir_call_attrs->metadata;
+        return metadata.count(attr::kReshapeOnly) &&
+               (Downcast<tvm::Integer>(metadata[attr::kReshapeOnly])->value == 1);
+      }
+    }
+
+    return false;
   }
   /*!
    * \brief Get the memory requirement.
@@ -375,9 +455,7 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
   std::unordered_map<const ExprNode*, std::vector<StorageToken*> > prototype_;
 };
 
-Map<Expr, Array<IntegerArray> > GraphPlanMemory(const Function& func) {
-  return StorageAllocator().Plan(func);
-}
+StaticMemoryPlan GraphPlanMemory(const Function& func) { return StorageAllocator().Plan(func); }
 
 TVM_REGISTER_GLOBAL("relay.backend.GraphPlanMemory").set_body_typed(GraphPlanMemory);
 

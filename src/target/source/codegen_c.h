@@ -25,7 +25,6 @@
 #define TVM_TARGET_SOURCE_CODEGEN_C_H_
 
 #include <tvm/ir/op.h>
-#include <tvm/runtime/container.h>
 #include <tvm/target/codegen.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -40,6 +39,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../../tir/transforms/ir_utils.h"
 #include "codegen_source_base.h"
 
 namespace tvm {
@@ -194,6 +194,8 @@ class CodeGenC : public ExprFunctor<void(const PrimExpr&, std::ostream&)>,
   virtual std::string CastFromTo(std::string value, DataType from, DataType target);
   // Get load of single element with expression
   virtual void PrintVecElemLoadExpr(DataType t, int i, const std::string& value, std::ostream& os);
+  // Print restrict keyword for a given Var if applicable
+  virtual void PrintRestrict(const Var& v, std::ostream& os);
 
  protected:
   // Print reference to struct location

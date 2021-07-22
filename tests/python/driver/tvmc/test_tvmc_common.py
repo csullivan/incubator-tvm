@@ -15,13 +15,11 @@
 # specific language governing permissions and limitations
 # under the License.
 import argparse
-import os
-from os import path
 
 import pytest
 
 import tvm
-from tvm import relay
+from tvm.contrib.target.vitis_ai import vitis_ai_available
 from tvm.driver import tvmc
 
 from tvm.driver.tvmc.common import TVMCException
@@ -31,7 +29,8 @@ def test_compile_tflite_module_nhwc_to_nchw(tflite_mobilenet_v1_1_quant):
     # some CI environments wont offer TFLite, so skip in case it is not present
     pytest.importorskip("tflite")
 
-    before, _ = tvmc.frontends.load_model(tflite_mobilenet_v1_1_quant)
+    tvmc_model = tvmc.frontends.load_model(tflite_mobilenet_v1_1_quant)
+    before = tvmc_model.mod
 
     expected_layout = "NCHW"
     after = tvmc.common.convert_graph_layout(before, expected_layout)
@@ -55,7 +54,8 @@ def test_compile_onnx_module_nchw_to_nhwc(onnx_resnet50):
     # some CI environments wont offer ONNX, so skip in case it is not present
     pytest.importorskip("onnx")
 
-    before, _ = tvmc.frontends.load_model(onnx_resnet50)
+    tvmc_model = tvmc.frontends.load_model(onnx_resnet50)
+    before = tvmc_model.mod
 
     expected_layout = "NHWC"
     after = tvmc.common.convert_graph_layout(before, expected_layout)
@@ -79,7 +79,8 @@ def test_compile_tflite_module__same_layout__nhwc_to_nhwc(tflite_mobilenet_v1_1_
     # some CI environments wont offer TFLite, so skip in case it is not present
     pytest.importorskip("tflite")
 
-    before, _ = tvmc.frontends.load_model(tflite_mobilenet_v1_1_quant)
+    tvmc_model = tvmc.frontends.load_model(tflite_mobilenet_v1_1_quant)
+    before = tvmc_model.mod
 
     expected_layout = "NHWC"
     after = tvmc.common.convert_graph_layout(before, expected_layout)
@@ -103,7 +104,8 @@ def test_compile_onnx_module__same_layout__nchw_to_nchw(onnx_resnet50):
     # some CI environments wont offer ONNX, so skip in case it is not present
     pytest.importorskip("onnx")
 
-    before, _ = tvmc.frontends.load_model(onnx_resnet50)
+    tvmc_model = tvmc.frontends.load_model(onnx_resnet50)
+    before = tvmc_model.mod
 
     expected_layout = "NCHW"
     after = tvmc.common.convert_graph_layout(before, expected_layout)
@@ -175,6 +177,11 @@ def test_shape_parser():
     shape_dict = tvmc.common.parse_shape_string(shape_string)
     # Convert to strings to allow comparison with Any.
     assert str(shape_dict) == "{'input': [?, 3, 224, 224]}"
+    # Check that multiple valid gpu inputs are parsed correctly.
+    shape_string = "gpu_0/data_0:[1, -1,224,224] gpu_1/data_1:[7, 7]"
+    shape_dict = tvmc.common.parse_shape_string(shape_string)
+    expected = "{'gpu_0/data_0': [1, ?, 224, 224], 'gpu_1/data_1': [7, 7]}"
+    assert str(shape_dict) == expected
 
     # Check that invalid pattern raises expected error.
     shape_string = "input:[a,10]"
@@ -184,11 +191,32 @@ def test_shape_parser():
     shape_string = "input:5,10 input2:10,10"
     with pytest.raises(argparse.ArgumentTypeError):
         tvmc.common.parse_shape_string(shape_string)
+    # Check that input with a invalid slash raises error.
+    shape_string = "gpu_0/data_0:5,10 /:10,10"
+    with pytest.raises(argparse.ArgumentTypeError):
+        tvmc.common.parse_shape_string(shape_string)
+    # Check that input with a invalid slash raises error.
+    shape_string = "gpu_0/data_0:5,10 data/:10,10"
+    with pytest.raises(argparse.ArgumentTypeError):
+        tvmc.common.parse_shape_string(shape_string)
+    # Check that input with a invalid slash raises error.
+    shape_string = "gpu_0/data_0:5,10 /data:10,10"
+    with pytest.raises(argparse.ArgumentTypeError):
+        tvmc.common.parse_shape_string(shape_string)
+    # Check that input with invalid slashes raises error.
+    shape_string = "gpu_0/invalid/data_0:5,10 data_1:10,10"
+    with pytest.raises(argparse.ArgumentTypeError):
+        tvmc.common.parse_shape_string(shape_string)
 
 
 def test_target_from_cli__error_duplicate():
     with pytest.raises(TVMCException):
         _ = tvmc.common.target_from_cli("llvm, llvm")
+
+
+def test_target_invalid_more_than_two_tvm_targets():
+    with pytest.raises(TVMCException):
+        _ = tvmc.common.target_from_cli("cuda, opencl, llvm")
 
 
 def test_target_from_cli__error_target_not_found():
@@ -199,6 +227,18 @@ def test_target_from_cli__error_target_not_found():
 def test_target_from_cli__error_no_tvm_target():
     with pytest.raises(TVMCException):
         _ = tvmc.common.target_from_cli("ethos-n77")
+
+
+def test_target_two_tvm_targets():
+    tvm_target, extra_targets = tvmc.common.target_from_cli(
+        "opencl -device=mali, llvm -mtriple=aarch64-linux-gnu"
+    )
+
+    assert "opencl" in str(tvm_target)
+    assert "llvm" in str(tvm_target.host)
+
+    # No extra targets
+    assert 0 == len(extra_targets)
 
 
 def test_tokenize_target_with_opts():
@@ -288,3 +328,53 @@ def test_parse_quotes_and_separators_on_options():
 
     assert len(targets_double_quote) == 1
     assert "+v1.0x,+value" == targets_double_quote[0]["opts"]["option1"]
+
+
+def test_config_invalid_format():
+    with pytest.raises(TVMCException):
+        _ = tvmc.common.parse_configs(["relay.backend.use_auto_scheduler.missing.value"])
+
+
+def test_config_missing_from_tvm():
+    with pytest.raises(TVMCException):
+        _ = tvmc.common.parse_configs(["relay.backend.use_auto_scheduler.missing.value=1234"])
+
+
+def test_config_unsupported_tvmc_config():
+    with pytest.raises(TVMCException):
+        _ = tvmc.common.parse_configs(["tir.LoopPartition=value"])
+
+
+def test_config_empty():
+    with pytest.raises(TVMCException):
+        _ = tvmc.common.parse_configs([""])
+
+
+def test_config_valid_config_bool():
+    configs = tvmc.common.parse_configs(["relay.backend.use_auto_scheduler=true"])
+
+    assert len(configs) == 1
+    assert "relay.backend.use_auto_scheduler" in configs.keys()
+    assert configs["relay.backend.use_auto_scheduler"] == True
+
+
+@pytest.mark.skipif(
+    not vitis_ai_available(),
+    reason="--target vitis-ai is not available. TVM built with 'USE_VITIS_AI OFF'",
+)
+def test_config_valid_multiple_configs():
+    configs = tvmc.common.parse_configs(
+        [
+            "relay.backend.use_auto_scheduler=false",
+            "tir.detect_global_barrier=10",
+            "relay.ext.vitis_ai.options.build_dir=mystring",
+        ]
+    )
+
+    assert len(configs) == 3
+    assert "relay.backend.use_auto_scheduler" in configs.keys()
+    assert configs["relay.backend.use_auto_scheduler"] == False
+    assert "tir.detect_global_barrier" in configs.keys()
+    assert configs["tir.detect_global_barrier"] == 10
+    assert "relay.ext.vitis_ai.options.build_dir" in configs.keys()
+    assert configs["relay.ext.vitis_ai.options.build_dir"] == "mystring"

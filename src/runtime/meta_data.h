@@ -26,18 +26,65 @@
 
 #include <dmlc/io.h>
 #include <dmlc/json.h>
+#include <tvm/runtime/executor_info.h>
 #include <tvm/runtime/module.h>
 #include <tvm/runtime/ndarray.h>
 #include <tvm/runtime/packed_func.h>
 
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "runtime_base.h"
 
 namespace tvm {
 namespace runtime {
+
+inline String get_name_mangled(const String& module_name, const String& name) {
+  std::stringstream ss;
+  ICHECK(module_name.defined());
+  ICHECK(name.defined());
+  ss << module_name << "_" << name;
+  return ss.str();
+}
+
+/*!
+ * \brief Structure that can be optionally used by the executor codegen
+ */
+class MetadataNode : public Object {
+ public:
+  /*! \brief number of inputs of the main function */
+  int num_inputs = 1;
+  /*! \brief number of outputs of the main function */
+  int num_outputs = 1;
+  /*! \brief the executor to be used to run the model */
+  String executor = kTvmExecutorGraph;
+
+  String mod_name = "";
+
+  static constexpr const uint32_t _type_index = TypeIndex::kDynamic;
+  static constexpr const char* _type_key = "MetadataObj";
+  TVM_DECLARE_FINAL_OBJECT_INFO(MetadataNode, Object);
+};
+
+/*!
+ * \brief Managed reference to MetadataNode.
+ */
+class Metadata : public ObjectRef {
+ public:
+  TVM_DLL Metadata(int num_inputs, int num_outputs, String executor, String mod_name) {
+    auto n = make_object<MetadataNode>();
+    n->num_inputs = num_inputs;
+    n->num_outputs = num_outputs;
+    n->executor = executor;
+    n->mod_name = mod_name;
+    data_ = std::move(n);
+  }
+
+  TVM_DEFINE_OBJECT_REF_METHODS(Metadata, ObjectRef, MetadataNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(MetadataNode);
+};
 
 /*!
  * \brief Create a metadata module object.

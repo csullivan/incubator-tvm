@@ -24,6 +24,7 @@
 
 #include "vm.h"
 
+#include <tvm/runtime/container/adt.h>
 #include <tvm/runtime/registry.h>
 
 #include <algorithm>
@@ -41,61 +42,32 @@ namespace vm {
 
 PackedFunc VirtualMachineDebug::GetFunction(const std::string& name,
                                             const ObjectPtr<Object>& sptr_to_self) {
-  if (name == "get_stat") {
-    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
-      ICHECK_EQ(args.size(), 1U);
-      std::vector<std::pair<Index, double>> op_acc_time;
-      std::unordered_map<Index, std::vector<double>> op_durations;
-      for (auto kv : op_timers_) {
-        std::vector<double> durations_us;
-        for (auto t : kv.second) {
-          durations_us.push_back(t->SyncAndGetElapsedNanos() / 1e3);
-        }
-        op_durations[kv.first] = durations_us;
-      }
-      for (auto kv : op_durations) {
-        auto val =
-            std::make_pair(kv.first, std::accumulate(kv.second.begin(), kv.second.end(), 0.0));
-        op_acc_time.push_back(val);
-      }
-      bool sort_by_time = args[0];
-      if (sort_by_time) {
-        auto comp = [](const std::pair<Index, double>& lhs, const std::pair<Index, double>& rhs) {
-          return lhs.second > rhs.second;
-        };
-        std::sort(op_acc_time.begin(), op_acc_time.end(), comp);
-      }
-      double total_duration = 0.0;
-      int64_t total_packed_funcs = 0;
-      std::ostringstream os;
-      os << std::setw(30) << std::left << "#OpName"
-         << "\t" << std::setw(10) << std::left << "#InvokeCount"
-         << "\t"
-         << "#Duration(us): Sum/Mean/Min/Max" << std::endl;
+  if (name == "profile") {
+    return TypedPackedFunc<profiling::Report(String, Array<profiling::MetricCollector>)>(
+        [sptr_to_self, this](String arg_name, Array<profiling::MetricCollector> collectors) {
+          std::vector<Device> devices;
+          for (auto dev : devices_) {
+            if (dev.device_type > 0) {
+              devices.push_back(dev);
+            }
+          }
 
-      for (auto kv : op_acc_time) {
-        auto vals = op_durations[kv.first];
-        auto sum = kv.second;
-        auto mean = sum / static_cast<double>(vals.size());
-        auto min_value = *std::min_element(vals.begin(), vals.end());
-        auto max_value = *std::max_element(vals.begin(), vals.end());
+          std::vector<profiling::MetricCollector> cs(collectors.begin(), collectors.end());
+          prof_ = profiling::Profiler(devices, cs);
 
-        os << std::setw(30) << std::left << packed_index_map_[kv.first] << "\t" << std::setw(10)
-           << std::left << op_invokes_[kv.first] << "\t" << sum << "/" << mean << "/" << min_value
-           << "/" << max_value << std::endl;
+          auto invoke = VirtualMachine::GetFunction("invoke", sptr_to_self);
+          // warmup
+          for (int i = 0; i < 3; i++) {
+            invoke(arg_name);
+          }
 
-        total_duration += sum;
-        total_packed_funcs += op_invokes_[kv.first];
-      }
-      os << "\nTotal Duration: " << total_duration << " us.\t"
-         << "Total Packed Functions: " << total_packed_funcs << std::endl;
-      *rv = os.str();
-    });
-  } else if (name == "reset") {
-    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
-      op_timers_.clear();
-      op_invokes_.clear();
-    });
+          prof_.operator*().Start();
+          invoke(arg_name);
+          prof_.operator*().Stop();
+          auto report = prof_.operator*().Report();
+          prof_ = dmlc::optional<profiling::Profiler>();  // releases hardware counters
+          return report;
+        });
   } else {
     return VirtualMachine::GetFunction(name, sptr_to_self);
   }
@@ -106,32 +78,61 @@ void VirtualMachineDebug::LoadExecutable(const Executable* exec) {
   ICHECK(exec_);
   for (auto kv : exec_->primitive_map) {
     packed_index_map_[kv.second] = kv.first;
-    op_invokes_[kv.second] = 0;
   }
 }
 
 void VirtualMachineDebug::InvokePacked(Index packed_index, const PackedFunc& func, Index arg_count,
                                        Index output_size, const std::vector<ObjectRef>& args) {
   ICHECK(exec_);
-  ICHECK(!ctxs_.empty()) << "Context has not been initialized yet.";
-  // The device context of any input of the operator is used for
-  // synchronization.
-  ICHECK_GT(arg_count, 0U);
-  ObjectRef arg = args[0];
-  while (arg->IsInstance<ADTObj>()) {
-    ADT adt = Downcast<ADT>(arg);
-    arg = adt[0];
+  ICHECK(!devices_.empty()) << "Device has not been initialized yet.";
+  if (prof_ && prof_.operator*().IsRunning()) {
+    // The device of any input of the operator is used for synchronization.
+    ICHECK_GT(arg_count, 0U);
+    ObjectRef arg = args[0];
+    while (arg->IsInstance<ADTObj>()) {
+      ADT adt = Downcast<ADT>(arg);
+      arg = adt[0];
+    }
+    ICHECK(arg->IsInstance<NDArray::ContainerType>());
+    auto nd_array = Downcast<NDArray>(arg);
+    auto dev = nd_array->device;
+
+    // get argument sizes
+    std::vector<NDArray> shapes;
+    for (Index i = 0; i < arg_count; i++) {
+      if (const auto* obj = args[i].as<ADTObj>()) {
+        for (size_t fi = 0; fi < obj->size; ++fi) {
+          auto o = (*obj)[fi];
+          shapes.push_back(Downcast<NDArray>(o));
+        }
+      } else {
+        shapes.push_back(Downcast<NDArray>(args[i]));
+      }
+    }
+
+    std::unordered_map<std::string, ObjectRef> metrics;
+
+    ICHECK(exec_->op_attrs.find(packed_index) != exec_->op_attrs.end())
+        << packed_index_map_[packed_index] << " not found in op attrs";
+
+    auto& op_attrs = exec_->op_attrs.at(packed_index);
+    for (auto p : op_attrs) {
+      if (std::string(p.first).find("layout") != std::string::npos) {
+        metrics[p.first] = p.second;
+      }
+    }
+    auto it = op_attrs.find("hash");
+    if (it != op_attrs.end()) {
+      metrics["Hash"] = Downcast<String>((*it).second);
+    }
+    metrics["Argument Shapes"] = profiling::ShapeString(shapes);
+
+    prof_.operator*().StartCall(packed_index_map_[packed_index], dev, metrics);
   }
-  ICHECK(arg->IsInstance<NDArray::ContainerType>());
-  auto nd_array = Downcast<NDArray>(arg);
-  auto ctx = nd_array->ctx;
-
-  Timer t = Timer::Start(ctx);
   VirtualMachine::InvokePacked(packed_index, func, arg_count, output_size, args);
-  t->Stop();
-
-  op_timers_[packed_index].push_back(t);
-  op_invokes_[packed_index] += 1;
+  if (prof_ && prof_.operator*().IsRunning()) {
+    prof_.operator*().StopCall();
+  }
 }
 
 runtime::Module CreateVirtualMachineDebug(const Executable* exec) {

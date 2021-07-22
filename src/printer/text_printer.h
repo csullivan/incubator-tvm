@@ -34,9 +34,11 @@
 #include <tvm/tir/function.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
+#include <tvm/tir/var.h>
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../ir/attr_functor.h"
@@ -60,6 +62,9 @@ class RelayTextPrinter : public ExprFunctor<Doc(const Expr&)>,
   explicit RelayTextPrinter(bool show_meta_data, TextMetaDataContext* meta,
                             runtime::TypedPackedFunc<std::string(ObjectRef)> annotate)
       : show_meta_data_(show_meta_data), annotate_(annotate), meta_(meta) {}
+  Doc VisitExpr(const Expr& expr) override;
+  virtual Doc VisitLeaf(const Expr& expr);
+  virtual bool CheckVisited(const Expr& expr);
 
   /*!
    * \brief Print additional info about expr in comment.
@@ -145,7 +150,7 @@ class RelayTextPrinter : public ExprFunctor<Doc(const Expr&)>,
   Doc PrintType(const Type& type, bool meta);
   Doc VisitTypeDefault_(const Object* node) final;
   Doc VisitType_(const TypeVarNode* node) final;
-  Doc VisitType_(const GlobalTypeVarNode* node);
+  Doc VisitType_(const GlobalTypeVarNode* node) final;
   Doc VisitType_(const TypeCallNode* node) final;
   Doc PrintDType(DataType dtype);
   Doc VisitType_(const TensorTypeNode* node) final;
@@ -170,6 +175,12 @@ class RelayTextPrinter : public ExprFunctor<Doc(const Expr&)>,
   runtime::TypedPackedFunc<std::string(ObjectRef)> annotate_;
   /*! \brief Stack of docs to implement scoped GNFing. */
   std::vector<Doc> doc_stack_{};
+  /*! \brief Set for introduced vars */
+  std::unordered_set<Expr, ObjectPtrHash, ObjectPtrEqual> var_memo_;
+  /*! \brief Set for exprs have been printed optional information */
+  std::unordered_set<Expr, ObjectPtrHash, ObjectPtrEqual> opt_info_memo_;
+  /*! \brief Map for result and memo_ diffs for visited expression */
+  std::unordered_map<Expr, Doc, ObjectPtrHash, ObjectPtrEqual> result_memo_;
   /*! \brief Map from Expr to Doc */
   std::unordered_map<Expr, Doc, ObjectPtrHash, ObjectPtrEqual> memo_;
   /*! \brief Map from Type to Doc */
@@ -246,6 +257,13 @@ class TIRTextPrinter : public StmtFunctor<Doc(const Stmt&)>,
   /*! \brief Print the node */
   Doc Print(const ObjectRef& node);
 
+  /*! \brief Place into `s` the name used in the preceding Print call for `v`.
+   * \param v Var instance to check. Must point to a VarNode visited by Print.
+   * \param s String to receive the name.
+   * \return true when a name re-mapping was found.
+   */
+  bool GetVarName(::tvm::tir::Var v, std::string* s);
+
  private:
   /*! \brief whether show meta data */
   bool show_meta_;
@@ -310,6 +328,7 @@ class TIRTextPrinter : public StmtFunctor<Doc(const Stmt&)>,
   Doc VisitStmt_(const ForNode* op) override;
   Doc VisitStmt_(const WhileNode* op) override;
   Doc VisitStmt_(const PrefetchNode* op) override;
+  Doc VisitStmt_(const BlockRealizeNode* op) override;
   Doc VisitStmtDefault_(const Object* op) override;
 
   Doc VisitType_(const PrimTypeNode* node) override;
@@ -324,6 +343,7 @@ class TIRTextPrinter : public StmtFunctor<Doc(const Stmt&)>,
   Doc PrintBuffer(const BufferNode* op);
   Doc BufferNode2Doc(const BufferNode* op, Doc doc);
   Doc PrintString(const StringObj* op) { return Doc::StrLiteral(op->data); }
+  Doc PrintBufferRegion(const BufferRegionNode* op);
 
   /*!
    * \brief special method to print out data type
@@ -348,6 +368,8 @@ class TIRTextPrinter : public StmtFunctor<Doc(const Stmt&)>,
   static Doc PrintSep(const std::vector<Doc>& vec, const Doc& sep);
   Doc PrintBody(const Stmt& body, bool indent = true);
 };
+
+String AsTVMScript(const ObjectRef& mod, bool show_meta = false);
 
 }  // namespace tir
 }  // namespace tvm
@@ -379,6 +401,8 @@ class TextPrinter {
   relay::RelayTextPrinter relay_text_printer_;
   /*! \brief TIR Text Printer */
   tir::TIRTextPrinter tir_text_printer_;
+
+  bool GetVarName(::tvm::tir::Var v, std::string* s) { return tir_text_printer_.GetVarName(v, s); }
 
   Doc PrintFinal(const ObjectRef& node) {
     Doc doc;

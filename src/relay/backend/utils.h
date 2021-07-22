@@ -37,11 +37,109 @@
 #include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
+
+#include "../../runtime/meta_data.h"
 
 namespace tvm {
 namespace relay {
 namespace backend {
+
+/*!
+ * \brief The static storage information produced by memory planning.
+ */
+class StorageInfoNode : public Object {
+ public:
+  /*! \brief The set of storage ids where the expression is stored. */
+  std::vector<int64_t> storage_ids;
+  /* \brief The type of "virtual devices" these expressions are stored on. */
+  std::vector<DLDeviceType> device_types;
+  /* \brief The sizes of each storage element. */
+  std::vector<int64_t> storage_sizes_in_bytes;
+
+  // TODO(@jroesch): expose the fields
+  void VisitAttrs(AttrVisitor* v) {}
+
+  static constexpr const char* _type_key = "relay.StorageInfo";
+  TVM_DECLARE_FINAL_OBJECT_INFO(StorageInfoNode, Object);
+};
+
+/*! \brief The storage information for a single expression. */
+class StorageInfo : public ObjectRef {
+ public:
+  StorageInfo(std::vector<int64_t> storage_ids, std::vector<DLDeviceType> device_types,
+              std::vector<int64_t> storage_sizes_in_bytes);
+  TVM_DEFINE_OBJECT_REF_METHODS(StorageInfo, ObjectRef, StorageInfoNode);
+};
+
+/*!
+ * \brief The result of static memory planning.
+ */
+class StaticMemoryPlanNode : public Object {
+ public:
+  Map<Expr, StorageInfo> expr_to_storage_info;
+
+  void VisitAttrs(AttrVisitor* v) { v->Visit("expr_to_storage_info", &expr_to_storage_info); }
+
+  static constexpr const char* _type_key = "relay.StaticMemoryPlan";
+  TVM_DECLARE_FINAL_OBJECT_INFO(StaticMemoryPlanNode, Object);
+};
+
+/*! \brief The result of running static memory planning. */
+class StaticMemoryPlan : public ObjectRef {
+ public:
+  explicit StaticMemoryPlan(Map<Expr, StorageInfo> expr_to_storage_info);
+  TVM_DEFINE_OBJECT_REF_METHODS(StaticMemoryPlan, ObjectRef, StaticMemoryPlanNode);
+};
+
+struct FunctionInfoNode : public Object {
+  Map<Target, Integer> workspace_sizes;
+  Map<Target, Integer> io_sizes;
+  Map<Target, Integer> constant_sizes;
+  Map<Target, tir::PrimFunc> tir_primfuncs;
+  Map<Target, Function> relay_primfuncs;
+
+  void VisitAttrs(tvm::AttrVisitor* v) {
+    v->Visit("workspace_sizes", &workspace_sizes);
+    v->Visit("io_sizes", &io_sizes);
+    v->Visit("constant_sizes", &constant_sizes);
+    v->Visit("tir_primfuncs", &tir_primfuncs);
+    v->Visit("relay_primfuncs", &relay_primfuncs);
+  }
+
+  static constexpr const char* _type_key = "relay.backend.FunctionInfo";
+  TVM_DECLARE_FINAL_OBJECT_INFO(FunctionInfoNode, Object);
+};
+
+class FunctionInfo : public ObjectRef {
+ public:
+  FunctionInfo(Map<Target, Integer> workspace_sizes, Map<Target, Integer> io_sizes,
+               Map<Target, Integer> constant_sizes, Map<Target, tir::PrimFunc> tir_primfuncs,
+               Map<Target, Function> relay_primfuncs);
+
+  TVM_DEFINE_MUTABLE_OBJECT_REF_METHODS(FunctionInfo, ObjectRef, FunctionInfoNode);
+};
+
+/*!
+ * \brief Calculate the storage required to store the type of relay.Expr
+ *
+ * \param func The relay expr for which the storage is calculated
+ */
+int64_t CalculateRelayExprSizeBytes(const Type& expr_type);
+
+/*!
+ *  \brief Executor generator artifacts. Those artifacts  are subsequently
+ *  used by the relay build process.
+ */
+struct LoweredOutput {
+  std::string graph_json;
+  Map<String, IRModule> lowered_funcs;
+  Array<tvm::runtime::Module> external_mods;
+  Map<String, FunctionInfo> function_metadata;
+  std::unordered_map<std::string, std::pair<int, const tvm::runtime::NDArray>> params;
+  runtime::Metadata metadata;
+};
 
 /*!
  * \brief A helper to expand the params by adding the ones used in a given expression.

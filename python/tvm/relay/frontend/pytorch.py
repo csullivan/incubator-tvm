@@ -21,31 +21,29 @@
 """PT: PyTorch frontend."""
 import itertools
 import logging
-import sys
 import math
+import sys
 
 import numpy as np
-
 import tvm
-from tvm.topi.utils import get_const_tuple
 from tvm.ir import IRModule
+from tvm.topi.utils import get_const_tuple
 
 from .. import analysis as _analysis
 from .. import expr as _expr
 from .. import function as _function
 from .. import op as _op
-from .. import qnn
-from ..ty import TupleType, TensorType, Any
+from .. import qnn, transform
+from ..expr_functor import ExprMutator
 from ..loops import while_loop
-from .. import transform
+from ..prelude import Prelude, StaticTensorArrayOps
+from ..ty import Any, TensorType, TupleType
+from . import qnn_torch
 from .common import AttrCvt, get_relay_op
 from .common import infer_value as _infer_value
-from .common import try_infer_value
+from .common import infer_shape as _infer_shape
 from .common import infer_value_simulated as _infer_value_simulated
-from ..prelude import Prelude, StaticTensorArrayOps
-from ..expr_functor import ExprMutator
-
-from . import qnn_torch
+from .common import try_infer_value
 from .pytorch_utils import is_version_greater_than
 
 __all__ = ["from_pytorch"]
@@ -394,10 +392,10 @@ class PyTorchOpConverter:
         stride = inputs[4]
 
         target_begin, is_begin_const = try_infer_value(
-            inputs[2], lambda ret: np.asscalar(ret.astype(np.int))
+            inputs[2], lambda ret: ret.astype(np.int).item(0)
         )
         target_end, is_end_const = try_infer_value(
-            inputs[3], lambda ret: np.asscalar(ret.astype(np.int))
+            inputs[3], lambda ret: ret.astype(np.int).item(0)
         )
 
         # A fast path when slicing is nop.
@@ -566,7 +564,7 @@ class PyTorchOpConverter:
             if isinstance(r, int):
                 reps.append(r)
             else:
-                reps.append(int(_infer_value(r, {}).asnumpy()))
+                reps.append(int(_infer_value(r, {}).numpy()))
 
         return _op.transform.tile(data, reps=reps)
 
@@ -606,7 +604,7 @@ class PyTorchOpConverter:
         for dim in data:
             if isinstance(dim, _expr.Expr):
                 if isinstance(dim, _expr.Constant):
-                    dim = int(dim.data.asnumpy())
+                    dim = int(dim.data.numpy())
                     if isinstance(size, list):
                         size.append(dim)
                     new_shape.append(dim)
@@ -757,9 +755,13 @@ class PyTorchOpConverter:
         return _op.nn.relu(data)
 
     def prelu(self, inputs, input_types):
+        # Reference: https://pytorch.org/docs/stable/generated/torch.nn.PReLU.html#torch.nn.PReLU
         data = inputs[0]
-        alpha = inputs[1]
-        return _op.nn.prelu(data, alpha)
+        dim = self.get_dims(data)
+        ndims = len(dim)
+        axis = 0 if ndims == 1 else 1
+        alpha = _op.broadcast_to(inputs[1], (dim[axis]))
+        return _op.nn.prelu(data, alpha, axis)
 
     def leaky_relu(self, inputs, input_types):
         data = inputs[0]
@@ -871,7 +873,7 @@ class PyTorchOpConverter:
         if isinstance(data, list):
             for i, _ in enumerate(data):
                 if isinstance(data[i], _expr.Expr):
-                    data[i] = int(_infer_value_simulated(data[i], {}).asnumpy())
+                    data[i] = int(_infer_value_simulated(data[i], {}).numpy())
         return data
 
     def maxpool_2d(self, inputs, input_types):
@@ -883,11 +885,15 @@ class PyTorchOpConverter:
         dilation = inputs[4]
         ceil_mode = int(inputs[5])
 
-        if dilation != [1, 1]:
-            msg = "MaxPool2d with dilation %s is not implemented" % (str(dilation))
-            raise NotImplementedError(msg)
-
-        return _op.nn.max_pool2d(data, pool_size, strides, padding, "NCHW", ceil_mode)
+        return _op.nn.max_pool2d(
+            data,
+            pool_size=pool_size,
+            strides=strides,
+            dilation=dilation,
+            padding=padding,
+            layout="NCHW",
+            ceil_mode=ceil_mode,
+        )
 
     def maxpool_2d_with_indices(self, inputs, input_types):
         # returns dummy indices too
@@ -902,11 +908,15 @@ class PyTorchOpConverter:
         dilation = inputs[4]
         ceil_mode = int(inputs[5])
 
-        if dilation != [1]:
-            msg = "MaxPool1d with dilation %s is not implemented" % (str(dilation))
-            raise NotImplementedError(msg)
-
-        return _op.nn.max_pool1d(data, pool_size, strides, padding, "NCW", ceil_mode)
+        return _op.nn.max_pool1d(
+            data,
+            pool_size=pool_size,
+            strides=strides,
+            dilation=dilation,
+            padding=padding,
+            layout="NCW",
+            ceil_mode=ceil_mode,
+        )
 
     def maxpool_3d(self, inputs, input_types):
         data = inputs[0]
@@ -916,12 +926,14 @@ class PyTorchOpConverter:
         padding = inputs[3]
         dilation = inputs[4]
         ceil_mode = int(inputs[5])
-        if dilation != [1, 1, 1]:
-            msg = "MaxPool3d with dilation %s is not implemented" % (str(dilation))
-            raise NotImplementedError(msg)
 
         return _op.nn.max_pool3d(
-            data, pool_size=pool_size, strides=strides, padding=padding, ceil_mode=ceil_mode
+            data,
+            pool_size=pool_size,
+            strides=strides,
+            dilation=dilation,
+            padding=padding,
+            ceil_mode=ceil_mode,
         )
 
     def hardtanh(self, inputs, input_types):
@@ -970,32 +982,52 @@ class PyTorchOpConverter:
         kernel_size = weight_shape[2:]
         use_bias = isinstance(bias, _expr.Expr)
 
-        if len(kernel_size) == 1:
-            strides = (1,) + strides
-            padding = (0,) + padding
-            dilation = (1,) + dilation
+        # We are trying to invoke various relay operations through a single conv_op variable.
+        # However the function signatures for some operations have additional attributes so we
+        # pass these in along with the standard ones.
+        additional_arguments = dict()
 
         if use_transpose:
             if len(kernel_size) == 3:
                 conv_op = _op.nn.conv3d_transpose
-            else:
+            elif len(kernel_size) == 2:
                 conv_op = _op.nn.conv2d_transpose
+            else:
+                conv_op = _op.nn.conv1d_transpose
+            output_padding = tuple(inputs[7])
+            additional_arguments["output_padding"] = output_padding
+
         else:
             if len(kernel_size) == 3:
                 conv_op = _op.nn.conv3d
-            else:
+            elif len(kernel_size) == 2:
                 conv_op = _op.nn.conv2d
+            else:
+                conv_op = _op.nn.conv1d
 
         if len(kernel_size) == 3:
             data_layout = "NCDHW"
             kernel_layout = "OIDHW"
-        else:
+        elif len(kernel_size) == 2:
             data_layout = "NCHW"
             kernel_layout = "OIHW"
+        else:
+            data_layout = "NCW"
+            kernel_layout = "OIW"
 
-        if len(kernel_size) == 1:
+        # Conv1d does not currently support grouped convolution so we convert it to conv2d
+        is_grouped_conv1d = False
+        if groups > 1 and len(kernel_size) == 1 and not use_transpose:
+            is_grouped_conv1d = True
+            conv_op = _op.nn.conv2d
+            kernel_size = [1] + kernel_size
+            strides = (1,) + strides
+            padding = (0,) + padding
+            dilation = (1,) + dilation
             data = _op.expand_dims(data, axis=2)
             weight = _op.expand_dims(weight, axis=2)
+            data_layout = "NCHW"
+            kernel_layout = "OIHW"
 
         conv_out = conv_op(
             data,
@@ -1005,17 +1037,20 @@ class PyTorchOpConverter:
             dilation=dilation,
             groups=groups,
             channels=channels,
-            kernel_size=[1] + kernel_size if len(kernel_size) == 1 else kernel_size,
+            kernel_size=kernel_size,
             data_layout=data_layout,
             kernel_layout=kernel_layout,
             out_layout="",
             out_dtype="",
+            **additional_arguments,
         )
         if use_bias:
             res = _op.nn.bias_add(conv_out, bias)
         else:
             res = conv_out
-        if len(kernel_size) == 1:
+        if is_grouped_conv1d:
+            # Because we conducted grouped conv1d convolution through conv2d we must
+            # squeeze the output to get the correct result.
             res = _op.squeeze(res, axis=[2])
         return res
 
@@ -1272,7 +1307,7 @@ class PyTorchOpConverter:
         for i, shape in enumerate(shape_inp):
             if isinstance(shape, _expr.Expr):
                 val = _infer_value_simulated(shape, {})
-                new_shape[i] = np.asscalar(val.asnumpy())
+                new_shape[i] = val.numpy().item(0)
 
         return _op.transform.reshape(data, new_shape)
 
@@ -1284,7 +1319,7 @@ class PyTorchOpConverter:
         is_dyn = False
         for s in new_shape:
             if isinstance(s, _expr.Constant):
-                tmp_shape.append(int(s.data.asnumpy()))
+                tmp_shape.append(int(s.data.numpy()))
             elif isinstance(s, _expr.Expr):
                 dim, success = try_infer_value(s, lambda ret: int(ret))
                 tmp_shape.append(dim)
@@ -1353,47 +1388,57 @@ class PyTorchOpConverter:
         beta = _expr.const(float(inputs[1]), dtype=dtype)
         return _op.log(_op.exp(inputs[0] * beta) + _expr.const(1.0, dtype=dtype)) / beta
 
-    def avg_pool2d(self, inputs, input_types):
-        data = inputs[0]
+    def make_avg_pool(self, dim):
+        def avg_pool(inputs, input_types):
+            data = inputs[0]
 
-        pool_size = self.convert_const_list(inputs[1])
-        strides = self.convert_const_list(inputs[2] if inputs[2] else pool_size)
-        padding = inputs[3]
-        ceil_mode = int(inputs[4])
-        count_include_pad = int(inputs[5])
+            pool_size = self.convert_const_list(inputs[1])
+            strides = self.convert_const_list(inputs[2] if inputs[2] else pool_size)
+            padding = inputs[3]
+            ceil_mode = int(inputs[4])
+            count_include_pad = int(inputs[5])
 
-        def func(x):
-            return _op.nn.avg_pool2d(
-                x,
-                pool_size=pool_size,
-                strides=strides,
-                padding=padding,
-                ceil_mode=ceil_mode,
-                count_include_pad=count_include_pad,
-            )
+            def func(x):
+                if dim == 1:
+                    return _op.nn.avg_pool1d(
+                        x,
+                        pool_size=pool_size,
+                        strides=strides,
+                        padding=padding,
+                        dilation=(1,),
+                        ceil_mode=ceil_mode,
+                        count_include_pad=count_include_pad,
+                    )
+                elif dim == 2:
+                    return _op.nn.avg_pool2d(
+                        x,
+                        pool_size=pool_size,
+                        strides=strides,
+                        padding=padding,
+                        dilation=(1, 1),
+                        ceil_mode=ceil_mode,
+                        count_include_pad=count_include_pad,
+                    )
+                elif dim == 3:
+                    return _op.nn.avg_pool3d(
+                        x,
+                        pool_size=pool_size,
+                        strides=strides,
+                        padding=padding,
+                        dilation=(1, 1, 1),
+                        ceil_mode=ceil_mode,
+                        count_include_pad=count_include_pad,
+                    )
+                else:
+                    msg = "Average Pooling dimension should be between 1 and 3"
+                    raise RuntimeError(msg)
 
-        if self.is_quantized_tensor(data):
-            return qnn_torch.apply_with_upcast(data, func)
+            if self.is_quantized_tensor(data):
+                return qnn_torch.apply_with_upcast(data, func)
 
-        return func(data)
+            return func(data)
 
-    def avg_pool3d(self, inputs, input_types):
-        data = inputs[0]
-
-        pool_size = inputs[1]
-        strides = inputs[2] if inputs[2] else pool_size
-        padding = inputs[3]
-        ceil_mode = int(inputs[4])
-        count_include_pad = int(inputs[5])
-
-        return _op.nn.avg_pool3d(
-            data,
-            pool_size=pool_size,
-            strides=strides,
-            padding=padding,
-            ceil_mode=ceil_mode,
-            count_include_pad=count_include_pad,
-        )
+        return avg_pool
 
     def linear(self, inputs, input_types):
         # https://pytorch.org/docs/stable/nn.functional.html#linear
@@ -1573,7 +1618,7 @@ class PyTorchOpConverter:
         b_shape = self.infer_shape_with_prelude(inputs_1)
 
         # When performing a batch matmul, we need to properly handle N-dim shapes.
-        if len(a_shape) > 2 or len(b_shape) > 2:
+        if len(a_shape) > 2 and len(b_shape) > 2:
             # Convert a into a 3 dimensional tensors.
             need_reshape_output = False
             if len(a_shape) != 3:
@@ -1599,17 +1644,31 @@ class PyTorchOpConverter:
             if need_reshape_output:
                 return _op.reshape(output, [*a_shape[:-2], a_shape[-2], b_shape[-1]])
             return output
+        elif len(a_shape) > 2:
+            inputs_0 = _op.reshape(inputs_0, [-1, a_shape[-1]])
 
-        # Otherwise a simple dense op will get the job done.
-        if len(b_shape) == 1:
-            input_1 = _op.expand_dims(inputs_1, 0, 1)
-        else:
+        if len(b_shape) > 2:
+            trans_axes = list(range(len(b_shape)))
+            trans_axes[-2], trans_axes[-1] = trans_axes[-1], trans_axes[-2]
+            input_1 = _op.reshape(_op.transpose(inputs_1, trans_axes), [-1, b_shape[-2]])
+        elif len(b_shape) == 2:
             input_1 = _op.transpose(inputs_1, axes=(1, 0))
+        elif len(b_shape) == 1:
+            input_1 = _op.expand_dims(inputs_1, 0, 1)
 
         out = _op.nn.dense(inputs_0, input_1)
 
         if len(b_shape) == 1:
             out = _op.squeeze(out, axis=[-1])
+
+        # Reshape output into a N dimensional tensor when a or b dim > 2
+        if len(a_shape) > 2:
+            out = _op.reshape(out, [*a_shape[:-1], b_shape[-1]])
+        elif len(b_shape) > 2:
+            out = _op.reshape(out, [a_shape[-2], -1, b_shape[-1]])
+            out = _op.reshape(
+                _op.transpose(out, [1, 0, 2]), [*b_shape[:-2], a_shape[-2], b_shape[-1]]
+            )
 
         return out
 
@@ -1630,7 +1689,7 @@ class PyTorchOpConverter:
         for i in range(out_dims):
             if sizes[i] != -1 and shape[i] == 1:
                 if not isinstance(sizes[i], int):
-                    sizes[i] = int(_infer_value(sizes[i], {}).asnumpy())
+                    sizes[i] = int(_infer_value(sizes[i], {}).numpy())
                 out = _op.repeat(out, sizes[i], axis=i)
 
         return out
@@ -1676,7 +1735,7 @@ class PyTorchOpConverter:
                 const_paddings.append([])
                 for p in pad:
                     if not isinstance(p, int):
-                        p = int(_infer_value(p, {}).asnumpy())
+                        p = int(_infer_value(p, {}).numpy())
                     const_paddings[-1].append(p)
 
             if mode == "constant":
@@ -1688,8 +1747,20 @@ class PyTorchOpConverter:
 
     def clamp(self, inputs, input_types):
         data = inputs[0]
-        amin = inputs[1] if inputs[1] else np.finfo(np.float32).min
-        amax = inputs[2] if inputs[2] else np.finfo(np.float32).max
+
+        def get_v(v, default_v):
+            if isinstance(v, _expr.Constant):
+                return float(v.data.numpy())
+            if isinstance(v, _expr.Expr):
+                infer_v, success = try_infer_value(v, lambda ret: float(ret))
+                if success:
+                    return infer_v
+            if v is not None:
+                return v
+            return default_v
+
+        amin = get_v(inputs[1], np.finfo(np.float32).min)
+        amax = get_v(inputs[2], np.finfo(np.float32).max)
         return _op.clip(data, amin, amax)
 
     def to(self, inputs, input_types):
@@ -1724,11 +1795,11 @@ class PyTorchOpConverter:
         if inputs[1] is not None:
             for size in inputs[1]:
                 if not isinstance(size, int):
-                    out_size.append(int(_infer_value(size, {}).asnumpy()))
+                    out_size.append(int(_infer_value(size, {}).numpy()))
                 else:
                     out_size.append(size)
         else:
-            scale_index = 3 if method in ["bilinear", "trilinear"] else 2
+            scale_index = 3 if method == "linear" else 2
             scales = inputs[scale_index]
             assert scales is not None, "neither out size nor scale provided"
             assert isinstance(scales, list)
@@ -1743,7 +1814,7 @@ class PyTorchOpConverter:
             data = inputs[0]
             out_size = self.get_upsample_out_size(inputs, method)
 
-            if len(inputs) > 2 and method == "bilinear":
+            if len(inputs) > 2 and method == "linear":
                 align_corners = inputs[2]
             else:
                 align_corners = False
@@ -1756,7 +1827,7 @@ class PyTorchOpConverter:
                 coord_trans = "half_pixel"
 
             def func(x):
-                return _op.image.resize(x, out_size, "NCHW", method, coord_trans)
+                return _op.image.resize2d(x, out_size, "NCHW", method, coord_trans)
 
             if self.is_quantized_tensor(data):
                 # input qparams are manually appended by us
@@ -1775,7 +1846,7 @@ class PyTorchOpConverter:
             data = inputs[0]
             out_size = self.get_upsample_out_size(inputs, method)
 
-            if len(inputs) > 2 and method == "trilinear":
+            if len(inputs) > 2 and method == "linear":
                 align_corners = inputs[2]
             else:
                 align_corners = False
@@ -1806,9 +1877,6 @@ class PyTorchOpConverter:
     def Float(self, inputs, input_types):
         assert len(inputs) == 1
         return _op.cast(inputs[0], "float32")
-
-    def mm(self, inputs, input_types):
-        return _op.nn.dense(inputs[0], inputs[1])
 
     def bitwise_not(self, inputs, input_types):
         data = inputs[0]
@@ -2085,26 +2153,13 @@ class PyTorchOpConverter:
         indices = inputs[1]
         values = inputs[2]
         accumulate = inputs[3]
-        # accumulate parameter is ignored.
-        # torch.index_put default is False but Relay.scatter_nd accumulates values.
-        # We assume there is no duplicate indices in torch.index_put input
         if not accumulate:
-            logging.warning(
-                "torch.index_put accumulate parameter is False. "
-                "TVM uses tvm.relay.scatter_nd operator which accumulates values. "
-                "Make sure there is no duplicate indices in torch.index_put input."
-            )
-        # Relay scatter_nd does not support input tensor
-        # We assume that torch.index_put is used with empty zero-values input tensor
-        # scatter_nd will create empty zero-values tensor with a given shape
-        out_shape = self.infer_shape(in_tensor)
-        logging.warning(
-            "tvm.relay.scatter_nd operator does not support input tensor parameter. "
-            "TVM assumes that torch.index_put is used with empty zero-values input tensor"
-        )
+            mode = "update"
+        else:
+            mode = "add"
         # Combine array of index tensors into one index tensor with shape (N,_)
         index_tensor = _op.stack(indices, axis=0)
-        return _op.transform.scatter_nd(values, index_tensor, out_shape)
+        return _op.transform.scatter_nd(in_tensor, index_tensor, values, mode)
 
     def scalar_tensor(self, inputs, input_types):
         data = inputs[0]
@@ -2116,7 +2171,7 @@ class PyTorchOpConverter:
         }
         type_key = inputs[1]
         if isinstance(data, _expr.Constant):
-            data = data.data.asnumpy().tolist()
+            data = data.data.numpy().tolist()
         return _expr.const(data, cast_map[type_key])
 
     def interpolate(self, inputs, input_types):
@@ -2138,6 +2193,8 @@ class PyTorchOpConverter:
         method = inputs[3]
         if method.startswith("nearest"):
             method = "nearest_neighbor"
+        elif method[0:2] == "bi":
+            method = method[2:]
 
         if method == "nearest_neighbor":
             coord_trans = "asymmetric"
@@ -2146,7 +2203,7 @@ class PyTorchOpConverter:
         else:
             coord_trans = "half_pixel"
 
-        return _op.image.resize(data, out_size, "NCHW", method, coord_trans)
+        return _op.image.resize2d(data, out_size, "NCHW", method, coord_trans)
 
     def numel(self, inputs, input_types):
         return _op.ndarray_size(inputs[0])
@@ -2241,16 +2298,329 @@ class PyTorchOpConverter:
             logging.warning("TVM always assumes sorted=True for torch.unique")
             is_sorted = True
         if return_counts:
-            [unique, indices, num_uniq, counts] = _op.unique(
+            [unique, indices, inverse_indices, num_uniq, counts] = _op.unique(
                 data, is_sorted=is_sorted, return_counts=True
             )
             unique_sliced = _op.strided_slice(unique, begin=[0], end=num_uniq, slice_mode="size")
             counts_sliced = _op.strided_slice(counts, begin=[0], end=num_uniq, slice_mode="size")
-            return (unique_sliced, indices, counts_sliced)
+            return (unique_sliced, inverse_indices, counts_sliced)
         else:
-            [unique, indices, num_uniq] = _op.unique(data, is_sorted=is_sorted, return_counts=False)
+            [unique, indices, inverse_indices, num_uniq] = _op.unique(
+                data, is_sorted=is_sorted, return_counts=False
+            )
             unique_sliced = _op.strided_slice(unique, begin=[0], end=num_uniq, slice_mode="size")
-            return (unique_sliced, indices)
+            return (unique_sliced, inverse_indices)
+
+    def nll_loss(self, inputs, input_types):
+        assert len(inputs) == 5
+        [predictions, targets, weights, reduction, ignore_index] = inputs
+        num_class = self.infer_shape(predictions)[1]
+        if reduction == 0:
+            reduction = "none"
+        elif reduction == 1:
+            reduction = "mean"
+        else:
+            reduction = "sum"
+        if weights is None:
+            weights = _op.full(_expr.const(1), (num_class,), dtype=input_types[0])
+        return _op.nn.nll_loss(predictions, targets, weights, reduction, ignore_index)
+
+    def flip(self, inputs, input_types):
+        data = inputs[0]
+        axis = inputs[1]
+        return _op.transform.reverse(data, axis=axis[0])
+
+    def lstm_cell(self, input_seqs, hidden, weights, has_proj=False):
+        if has_proj:
+            assert len(weights) == 5
+        else:
+            assert len(weights) == 4
+        outputs_list = []
+        # Default activations types
+        f_act = _op.sigmoid
+        g_act = _op.tanh
+        h_act = _op.tanh
+
+        # Input hiddens
+        H_t = hidden[0]  # (batch, hidden_size)
+        C_t = hidden[1]  # (batch, hidden_size)
+        for x_t in input_seqs:
+            # x_t shape = (batch, feature size)
+            # gates shape = (batch, 4 * hidden_size)
+            gates = _op.nn.dense(x_t, weights[0]) + _op.nn.dense(H_t, weights[1])
+            # Add biases
+            if weights[2] is not None:
+                gates += weights[2]
+            if weights[3] is not None:
+                gates += weights[3]
+            i, f, c, o = _op.split(gates, 4, axis=-1)  # (batch, hidden_size)
+
+            i = f_act(i)
+            f = f_act(f)
+            c = g_act(c)
+            o = f_act(o)
+
+            C = f * C_t + i * c
+            H = o * h_act(C)
+
+            if has_proj:
+                H = _op.nn.dense(H, weights[4])
+
+            H_t = H
+            C_t = C
+            outputs_list.append(H)  # [seq_num, (batch, hidden_size)]
+        hidden_outputs = (H_t, C_t)
+
+        return (outputs_list, hidden_outputs)
+
+    def bidir_lstm_cell(self, input_seq, hidden_pair, weights_pair, has_proj=False):
+        fw_outputs = self.lstm_cell(input_seq, hidden_pair[0], weights_pair[0], has_proj)
+
+        rev_input_seq = []
+        seq_len = len(input_seq)
+        for i in range(seq_len):
+            rev_input_seq.append(input_seq[seq_len - 1 - i])  # [seq_num, (batch, hidden_size)]
+        rev_outputs = self.lstm_cell(rev_input_seq, hidden_pair[1], weights_pair[1], has_proj)
+
+        final_outputs = []  # [seq_num, (batch, 2 * hidden_size)]
+        for j in range(seq_len):
+            final_outputs.append(
+                _op.concatenate([fw_outputs[0][j], rev_outputs[0][seq_len - 1 - j]], -1)
+            )
+
+        return final_outputs, (fw_outputs[1], rev_outputs[1])
+
+    def lstm_layers(
+        self, input_data, hiddens, weights, bidirectional, dtype, dropout_p=0.0, has_proj=False
+    ):
+        hidden_layers_num = len(hiddens)
+        assert len(weights) == hidden_layers_num
+
+        # split input sequence to samples set
+        input_seqs = self.unbind((input_data, 0), dtype)  # [seq_num, (batch, feature_size)]
+        output_hiddens = []
+        for k in range(hidden_layers_num):
+            hiddens_input = hiddens[k]
+            weights_input = weights[k]
+
+            outputs = (
+                self.bidir_lstm_cell(input_seqs, hiddens_input, weights_input, has_proj)
+                if bidirectional
+                else self.lstm_cell(input_seqs, hiddens_input, weights_input, has_proj)
+            )
+
+            output_hiddens.append(outputs[1])
+            # input_seqs shape = [seq_num, (batch, feature_size)] or
+            # [seq_num, (batch, 2*feature_size)] for bidirectional
+            input_seqs = outputs[0]
+
+            # TODO (vvchernov): in pytorch implementation train is also checked
+            # see https://github.com/pytorch/pytorch/blob/70c8daf43946b53af6493d058899ef952d27d339
+            # /aten/src/ATen/native/RNN.cpp#L1054
+            if dropout_p != 0 and k < hidden_layers_num - 1:
+                # for input in input_seqs:
+                #     input = _op.dropout(input, dropout_p)
+                raise NotImplementedError("Dropout for LSTM has not been supported yet!")
+        final_hiddens = []
+        if bidirectional:
+            for i in range(hidden_layers_num):
+                final_hiddens.append(output_hiddens[i][0])
+                final_hiddens.append(output_hiddens[i][1])
+        else:
+            final_hiddens = output_hiddens
+
+        return _op.stack(input_seqs, 0), final_hiddens
+
+    def lstm(self, inputs, input_types):
+        """
+        Description of LSTM in pytorch:https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
+        Native implementation for torch version less than 1.8.0 (projection is unsupported):
+        https://github.com/pytorch/pytorch/blob/70c8daf43946b53af6493d058899ef952d27d339/aten/ \
+        src/ATen/native/RNN.cpp#L1396
+        Native implementation for torch version from 1.8.0 and higher (projection is supported):
+        https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/native/RNN.cpp#L1483
+        """
+        # TODO (vvchernov): support dropout
+        assert len(inputs) == 9, "Input of size 9 is expected"
+        # Unpack inputs, note that if optional and not provided then value will be None.
+        _X = inputs[0]
+        # _X shape (seq_num, batch, feature_size) or (batch, seq_num, feature_size)
+
+        hidden_states = inputs[1]
+        assert len(hidden_states) == 2, "lstm expects two hidden states"
+        h_0 = hidden_states[0]
+        c_0 = hidden_states[1]
+        # H0 shape (hidden_layers_num, batch, proj_size) if projection
+        # else (hidden_layers_num, batch, hidden_size)
+        # C0 shape (hidden_layers_num, batch, hidden_size)
+
+        _weights = inputs[2]
+        # If no projection
+        # Wi layer[0] shape (4 * hidden_size, feature_size)
+        # Wh layer[0] shape (4 * hidden_size, hidden_size)
+        # Bi layer[0] shape (4 * hidden_size)
+        # Bh layer[0] shape (4 * hidden_size)
+
+        # Wi layer[>0] shape (4 * hidden_size, hidden_size * num_directions)
+        # Wh layer[>0] shape (4 * hidden_size, hidden_size)
+        # Bi layer[>0] shape (4 * hidden_size)
+        # Bh layer[>0] shape (4 * hidden_size)
+
+        # If projection
+        # Wi layer[0] shape (4 * hidden_size, feature_size)
+        # Wh layer[0] shape (4 * hidden_size, proj_size)
+        # Bi layer[0] shape (4 * hidden_size)
+        # Bh layer[0] shape (4 * hidden_size)
+        # P  layer[0] shape (proj_size, hidden_size)
+
+        # Wi layer[>0] shape (4 * hidden_size, proj_size * num_directions)
+        # Wh layer[>0] shape (4 * hidden_size, proj_size)
+        # Bi layer[>0] shape (4 * hidden_size)
+        # Bh layer[>0] shape (4 * hidden_size)
+        # P  layer[>0] shape (proj_size, hidden_size)
+
+        # Scalar inputs
+        has_biases = inputs[3]
+        num_layers = inputs[4]
+        dropout_p = inputs[5]  # dropout probability, if 0.0 it means there is no dropout
+        # train = inputs[6]
+        bidirectional = inputs[7]
+        batch_first = inputs[8]
+
+        num_directions = 1
+        if bidirectional:
+            num_directions = 2
+
+        rsd = len(_weights) % num_layers
+        assert rsd == 0, "The number of weights must be a multiple of the number of layers!"
+        rsd = (len(_weights) / num_layers) % num_directions
+        assert (
+            rsd == 0
+        ), "The number of weights in layer must be a multiple of the number of directions!"
+        has_proj = False
+        proj_size = 0
+        weights_num = int(len(_weights) / num_layers / num_directions)
+        if has_biases:
+            if weights_num == 5:
+                has_proj = True
+                proj_size = _infer_shape(_weights[4])[0]
+            else:
+                assert weights_num == 4, "The weights number in layer is expected equal to 4"
+        else:
+            if weights_num == 3:
+                has_proj = True
+                proj_size = _infer_shape(_weights[2])[0]
+            else:
+                assert weights_num == 2, "The weights number in layer is expected equal to 2"
+
+        weights = []
+        if has_biases:
+            if bidirectional:
+                rsd = len(_weights) % (2 * weights_num)
+                assert rsd == 0, "got an incorrect number of LSTM weights"
+                for i in range(0, len(_weights), 2 * weights_num):
+                    fw_weights = []
+                    rev_weights = []
+                    for j in range(weights_num):
+                        fw_weights.append(_weights[i + j])
+                        rev_weights.append(_weights[i + j + weights_num])
+                    weights.append((fw_weights, rev_weights))
+            else:
+                assert len(_weights) % weights_num == 0, "got an incorrect number of LSTM weights"
+                for i in range(0, len(_weights), weights_num):
+                    fw_weights = []
+                    for j in range(weights_num):
+                        fw_weights.append(_weights[i + j])
+                    weights.append(fw_weights)
+        else:
+            if bidirectional:
+                rsd = len(_weights) % (2 * weights_num)
+                assert rsd == 0, "got an incorrect number of LSTM weights"
+                for i in range(0, len(_weights), 2 * weights_num):
+                    fw_weights = []
+                    rev_weights = []
+                    k = i + weights_num
+                    if has_proj:
+                        fw_weights = [_weights[i], _weights[i + 1], None, None, _weights[i + 2]]
+                        rev_weights = [_weights[k], _weights[k + 1], None, None, _weights[k + 2]]
+                    else:
+                        fw_weights = [_weights[i], _weights[i + 1], None, None]
+                        rev_weights = [_weights[k], _weights[k + 1], None, None]
+                    weights.append((fw_weights, rev_weights))
+            else:
+                assert len(_weights) % weights_num == 0, "got an incorrect number of LSTM weights"
+                for i in range(0, len(_weights), weights_num):
+                    if has_proj:
+                        fw_weights = [_weights[i], _weights[i + 1], None, None, _weights[i + 2]]
+                    else:
+                        fw_weights = [_weights[i], _weights[i + 1], None, None]
+                    weights.append(fw_weights)
+        assert (
+            len(weights) == num_layers
+        ), "For stacked LSTM number of weights tuples should be the same as number of layers!"
+
+        X = _op.transpose(_X, (1, 0, 2)) if batch_first else _X
+        # TODO (vvchernov): Which data type should be used? from input or weights?
+        # Instead of it _infer_type(X).checked_type.dtype can be used
+        X_dtype = input_types[0]
+        X_shape = _infer_shape(X)  # (seq_num, batch, feature_size)
+
+        hidden_size = _infer_shape(_weights[0])[0] / 4
+        batch_size = X_shape[1]
+
+        # Initialize hidden states if not provided.
+        layers_h = []
+        layers_c = []
+        hidden_layers_num = num_directions * num_layers
+        if h_0 is None:
+            if has_proj:
+                h_0 = _op.zeros((batch_size, proj_size), X_dtype)
+            else:
+                h_0 = _op.zeros((batch_size, hidden_size), X_dtype)
+            for i in range(hidden_layers_num):
+                layers_h.append(h_0)
+        else:
+            layers_h = self.unbind((h_0, 0), X_dtype)
+        if c_0 is None:
+            c_0 = _op.zeros((batch_size, hidden_size), X_dtype)
+            for i in range(hidden_layers_num):
+                layers_c.append(c_0)
+        else:
+            layers_c = self.unbind((c_0, 0), X_dtype)
+
+        hiddens = []
+        for i in range(num_layers):
+            if bidirectional:
+                hiddens.append(
+                    ((layers_h[2 * i], layers_c[2 * i]), (layers_h[2 * i + 1], layers_c[2 * i + 1]))
+                )
+            else:
+                hiddens.append((layers_h[i], layers_c[i]))
+
+        outputs = self.lstm_layers(
+            X,
+            hiddens,
+            weights,
+            bidirectional,
+            dtype=X_dtype,
+            dropout_p=dropout_p,
+            has_proj=has_proj,
+        )
+
+        # output shape = (seq_num, batch, hidden_size) or
+        # (seq_num, batch, 2*feature_size) for bidirectional
+        output = outputs[0]
+
+        hy = []
+        cy = []
+        for hidden in outputs[1]:
+            hy.append(hidden[0])
+            cy.append(hidden[1])
+
+        if batch_first:
+            output = _op.transpose(output, (1, 0, 2))
+
+        return (output, _op.stack(hy, 0), _op.stack(cy, 0))
 
     # Operator mappings
     def create_convert_map(self):
@@ -2338,8 +2708,9 @@ class PyTorchOpConverter:
             "aten::log_softmax": self.log_softmax,
             "aten::sigmoid": self.sigmoid,
             "aten::softplus": self.softplus,
-            "aten::avg_pool2d": self.avg_pool2d,
-            "aten::avg_pool3d": self.avg_pool3d,
+            "aten::avg_pool1d": self.make_avg_pool(1),
+            "aten::avg_pool2d": self.make_avg_pool(2),
+            "aten::avg_pool3d": self.make_avg_pool(3),
             "aten::linear": self.linear,
             "aten::dropout": self.dropout,
             "aten::dropout_": self.dropout,
@@ -2399,9 +2770,9 @@ class PyTorchOpConverter:
             "aten::clamp": self.clamp,
             "aten::clamp_": self.clamp,
             "aten::detach": self.identity,
-            "aten::upsample_bilinear2d": self.make_upsample("bilinear"),
+            "aten::upsample_bilinear2d": self.make_upsample("linear"),
             "aten::upsample_nearest2d": self.make_upsample("nearest_neighbor"),
-            "aten::upsample_trilinear3d": self.make_upsample3d("trilinear"),
+            "aten::upsample_trilinear3d": self.make_upsample3d("linear"),
             "aten::upsample_nearest3d": self.make_upsample3d("nearest_neighbor"),
             "aten::expand_as": self.expand_as,
             "aten::lt": self.make_elemwise("less"),
@@ -2459,17 +2830,22 @@ class PyTorchOpConverter:
             "aten::hardsigmoid": self.hard_sigmoid,
             "aten::cumsum": self.cumsum,
             "aten::masked_fill": self.masked_fill,
+            "aten::masked_fill_": self.masked_fill,
             "aten::masked_select": self.masked_select,
             "aten::argsort": self.argsort,
             "aten::sort": self.sort,
             "aten::_unique2": self.unique,
+            "aten::nll_loss": self.nll_loss,
+            "aten::nll_loss2d": self.nll_loss,
+            "aten::flip": self.flip,
+            "aten::lstm": self.lstm,
         }
 
     def update_convert_map(self, custom_map):
         self.convert_map.update(custom_map)
 
     def report_missing_conversion(self, op_names):
-        """ Check if all ops in an input graph are supported by TVM """
+        """Check if all ops in an input graph are supported by TVM"""
         known_ops = [
             "prim::Constant",
             "prim::GetAttr",
@@ -2491,13 +2867,13 @@ class PyTorchOpConverter:
             raise NotImplementedError(msg)
 
     def convert_block(self, block, outputs):
-        """ Translate Torch "Block", used for prim::If and prim::Loop """
+        """Translate Torch "Block", used for prim::If and prim::Loop"""
         ops = _get_operator_nodes(block.nodes())
         ret_names = _get_input_names(block.returnNode())
         return self.convert_operators(ops, outputs, ret_names)
 
     def convert_if(self, if_node, outputs):
-        """ Translate Torch prim::If to Relay If """
+        """Translate Torch prim::If to Relay If"""
         cond = outputs[if_node.inputsAt(0).debugName()]
         blocks = list(if_node.blocks())
         true_branch = self.convert_block(blocks[0], outputs)
@@ -2506,7 +2882,7 @@ class PyTorchOpConverter:
         return _expr.If(cond, true_branch[0], false_branch[0])
 
     def convert_loop(self, loop_node, outputs):
-        """ Translate Torch prim::Loop to Relay while_loop """
+        """Translate Torch prim::Loop to Relay while_loop"""
 
         def get_input(index):
             ivalue = loop_node.inputsAt(index)
@@ -2636,7 +3012,7 @@ class PyTorchOpConverter:
         return [_expr.TupleGetItem(loop_val, i + 1) for i in range(num_loop_var)]
 
     def convert_operators(self, operators, outputs, ret_names):
-        """ Convert each Torch IR operators to Relay equivalent """
+        """Convert each Torch IR operators to Relay equivalent"""
         for node_name, op_node in operators:
             operator = op_node.kind()
             inputs = _get_op_inputs(op_node, outputs)
@@ -2818,7 +3194,7 @@ def _wrap_const(c):
 
 
 def _run_jit_passes(graph):
-    """ The inline pass is necessary to unwrap prim::CallMethod """
+    """The inline pass is necessary to unwrap prim::CallMethod"""
     # pylint: disable=c-extension-no-member
     import torch
 
@@ -2924,7 +3300,7 @@ def _get_input_types(op_node, outputs, default_dtype="float32"):
 
 
 def _get_constant(node):
-    """ Retrieve a constant associated with this prim::Constant node """
+    """Retrieve a constant associated with this prim::Constant node"""
     attribute_names = node.attributeNames()
     num_attributes = len(attribute_names)
 
@@ -2958,7 +3334,7 @@ def _get_constant(node):
 
 
 def _get_operator_nodes(nodes):
-    """ Returns torch IR nodes that need conversion to Relay """
+    """Returns torch IR nodes that need conversion to Relay"""
     ops = []
     # Traverse nodes and add to graph
     for node in nodes:
@@ -3172,7 +3548,7 @@ def convert_params(graph, state_dict):
 
 
 def get_all_op_names(graph):
-    """ Return all operator names in the input graph """
+    """Return all operator names in the input graph"""
     nodes = list(graph.nodes())
     prim_with_blocks = ["prim::If", "prim::Loop"]
     for prim in prim_with_blocks:
@@ -3208,7 +3584,7 @@ def from_pytorch(script_module, input_infos, custom_convert_map=None, default_dt
 
     Returns
     -------
-    mod : tvm.relay.Module
+    mod : tvm.IRModule
         The module that optimizations will be performed on.
 
     params : dict of str to tvm.runtime.NDArray

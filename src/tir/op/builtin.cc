@@ -155,6 +155,10 @@ TIR_DEFINE_BUILTIN_FUNC(tvm_struct_set)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kUpdateState));
 
+TIR_DEFINE_BUILTIN_FUNC(lookup_param)
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kUpdateState));
+
 TIR_DEFINE_BUILTIN_FUNC(tvm_throw_last_error)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
@@ -174,6 +178,9 @@ TIR_DEFINE_BUILTIN_FUNC(tvm_stack_make_array)
 TIR_DEFINE_BUILTIN_FUNC(tvm_call_packed)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_BUILTIN_FUNC(tvm_call_cpacked)
+    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_BUILTIN_FUNC(tvm_call_trace_packed)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
@@ -182,6 +189,9 @@ TIR_DEFINE_BUILTIN_FUNC(tvm_thread_context)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_BUILTIN_FUNC(tvm_call_packed_lowered)
+    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_BUILTIN_FUNC(tvm_call_cpacked_lowered)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_BUILTIN_FUNC(tvm_call_trace_packed_lowered)
@@ -234,6 +244,17 @@ TIR_DEFINE_BUILTIN_FUNC(vectorcombine)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_BUILTIN_FUNC(atomic_add)
+    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_BUILTIN_FUNC(texture2d_alloca)
+    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_BUILTIN_FUNC(texture2d_store)
+    .set_attr<TVectorizable>("TVectorizable", true)
+    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_BUILTIN_FUNC(texture2d_load)
+    .set_attr<TVectorizable>("TVectorizable", true)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 }  // namespace builtin

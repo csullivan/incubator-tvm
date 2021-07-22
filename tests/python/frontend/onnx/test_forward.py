@@ -14,17 +14,22 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import os
+import re
+
 import numpy as np
-import onnx
-from onnx import helper, TensorProto, mapping, numpy_helper
+import pytest
+import scipy
 import torch
 import torchvision
-import tvm.topi.testing
 import tvm
-from tvm import relay
-from tvm.contrib import graph_runtime
-import scipy
 import tvm.testing
+import tvm.topi.testing
+from tvm import relay
+from tvm.contrib import graph_executor
+
+import onnx
+from onnx import TensorProto, helper, mapping, numpy_helper
 
 
 def get_input_data_shape_dict(graph_def, input_data):
@@ -42,9 +47,9 @@ def get_input_data_shape_dict(graph_def, input_data):
 
 
 def get_tvm_output_with_vm(
-    graph_def, input_data, target, ctx, opset=None, freeze_params=False, convert_to_static=False
+    graph_def, input_data, target, device, opset=None, freeze_params=False, convert_to_static=False
 ):
-    """ Generic function to execute and get tvm output with vm executor"""
+    """Generic function to execute and get tvm output with vm executor"""
     if not isinstance(input_data, list):
         input_data = [input_data]
     _, shape_dict = get_input_data_shape_dict(graph_def, input_data)
@@ -56,27 +61,36 @@ def get_tvm_output_with_vm(
     if convert_to_static:
         mod = relay.transform.DynamicToStatic()(mod)
 
-    ex = relay.create_executor("vm", mod=mod, ctx=ctx, target=target)
-    result = ex.evaluate()(*input_data)
+    ex = relay.create_executor("vm", mod=mod, device=device, target=target)
+    result = ex.evaluate()(*input_data, **params)
     if isinstance(result, tvm.runtime.NDArray):
-        return result.asnumpy()
-    return [r.asnumpy() for r in result]
+        return result.numpy()
+    return [r.numpy() for r in result]
 
 
 def get_tvm_output(
-    graph_def, input_data, target, ctx, output_shape=None, output_dtype="float32", opset=None
+    graph_def,
+    input_data,
+    target,
+    device,
+    output_shape=None,
+    output_dtype="float32",
+    opset=None,
+    opt_level=1,
 ):
-    """ Generic function to execute and get tvm output"""
+    """Generic function to execute and get tvm output"""
+    # TODO: Resolve the issues and remove the following lines
     target = "llvm"
+    device = tvm.cpu(0)
 
     input_names, shape_dict = get_input_data_shape_dict(graph_def, input_data)
 
     mod, params = relay.frontend.from_onnx(graph_def, shape_dict, opset=opset)
-    with tvm.transform.PassContext(opt_level=1):
+
+    with tvm.transform.PassContext(opt_level=opt_level):
         graph, lib, params = relay.build(mod, target, params=params)
 
-    ctx = tvm.cpu(0)
-    m = graph_runtime.create(graph, lib, ctx)
+    m = graph_executor.create(graph, lib, device)
     # set inputs
     if isinstance(input_data, list):
         for i, e in enumerate(input_names):
@@ -97,17 +111,17 @@ def get_tvm_output(
         tvm_output_list = []
         for i, _ in enumerate(output_shape):
             tvm_output = m.get_output(i)
-            tvm_output_list.append(tvm_output.asnumpy())
+            tvm_output_list.append(tvm_output.numpy())
         return tvm_output_list
     else:
         tvm_output = m.get_output(0)
-        return tvm_output.asnumpy()
+        return tvm_output.numpy()
 
 
 def get_onnxruntime_output(model, inputs):
     import onnxruntime.backend
 
-    rep = onnxruntime.backend.prepare(model, "CPU")
+    rep = onnxruntime.backend.prepare(model.SerializeToString(), "CPU")
     if isinstance(inputs, list) and len(inputs) == 1:
         inp = inputs[0]
     else:
@@ -132,28 +146,32 @@ def verify_with_ort_with_inputs(
     rtol=1e-5,
     atol=1e-5,
     apply_softmax=False,
+    opt_level=1,
 ):
     if opset is not None:
         model.opset_import[0].version = opset
+
     ort_out = get_onnxruntime_output(model, inputs)
 
     if targets is None:
         targets = [tgt for (tgt, _) in tvm.testing.enabled_targets()]
 
     for target in targets:
-        ctx = tvm.context(target, 0)
+        dev = tvm.device(target, 0)
         if use_vm:
             tvm_out = get_tvm_output_with_vm(
                 model,
                 inputs,
                 target,
-                ctx,
+                dev,
                 opset=opset,
                 freeze_params=freeze_params,
                 convert_to_static=convert_to_static,
             )
         else:
-            tvm_out = get_tvm_output(model, inputs, target, ctx, out_shape, dtype, opset=opset)
+            tvm_out = get_tvm_output(
+                model, inputs, target, dev, out_shape, dtype, opset=opset, opt_level=opt_level
+            )
         if not isinstance(tvm_out, list):
             tvm_out = [tvm_out]
         if not isinstance(ort_out, list):
@@ -204,6 +222,12 @@ def make_constant_node(name, data_type, dims, vals):
     )
 
 
+def is_version_greater_than(ver):
+    return "".join(re.findall(r"(\d+\.)(\d+\.)(\d)", onnx.__version__)[0]) > "".join(
+        re.findall(r"(\d+\.)(\d+\.)(\d)", ver)[0]
+    )
+
+
 @tvm.testing.uses_gpu
 def test_reshape():
     in_shape = (4, 3, 3, 4)
@@ -232,9 +256,9 @@ def test_reshape():
 
     model = helper.make_model(graph, producer_name="reshape_test")
 
-    for target, ctx in tvm.testing.enabled_targets():
+    for target, dev in tvm.testing.enabled_targets():
         x = np.random.uniform(size=in_shape).astype("int32")
-        tvm_out = get_tvm_output(model, x, target, ctx, ref_shape, "float32")
+        tvm_out = get_tvm_output(model, x, target, dev, ref_shape, "float32")
         tvm.testing.assert_allclose(ref_shape, tvm_out.shape)
 
 
@@ -268,14 +292,13 @@ def test_double_reshape():
 
     model = helper.make_model(graph, producer_name="reshape_test")
 
-    for target, ctx in tvm.testing.enabled_targets():
+    for target, dev in tvm.testing.enabled_targets():
         x = np.random.uniform(size=in_shape).astype("int32")
-        tvm_out = get_tvm_output(model, x, target, ctx, ref_shape, "float32")
+        tvm_out = get_tvm_output(model, x, target, dev, ref_shape, "float32")
         tvm.testing.assert_allclose(ref_shape, tvm_out.shape)
 
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_expand():
     def _test_expand(name, data, shape, ref_data, dtype="int32"):
         shape_array = np.array(shape)
@@ -316,8 +339,8 @@ def test_expand():
 
         model = helper.make_model(graph, producer_name=name)
 
-        for target, ctx in tvm.testing.enabled_targets():
-            tvm_out = get_tvm_output_with_vm(model, data, target, ctx, freeze_params=True)
+        for target, dev in tvm.testing.enabled_targets():
+            tvm_out = get_tvm_output_with_vm(model, data, target, dev, freeze_params=True)
             tvm.testing.assert_allclose(ref_data, tvm_out)
 
     in_shape = (3, 1)
@@ -353,7 +376,7 @@ def verify_depth_to_space(inshape, outshape, mode, blockSize):
 @tvm.testing.uses_gpu
 def test_depth_to_space():
     # current onnx.checker use OpSet-1 version of DepthToSpace, which doesn't have a mode argument.
-    # TO-DO, we can add mode arguement to test CRD mode and DCR mode
+    # TO-DO, we can add mode argument to test CRD mode and DCR mode
     # in the future when we update to a newer onnx version.
     verify_depth_to_space((1, 8, 2, 3), (1, 2, 4, 6), mode="CRD", blockSize=2)
 
@@ -408,9 +431,9 @@ def test_shape():
 
     model = helper.make_model(graph, producer_name="shape_test")
 
-    for target, ctx in tvm.testing.enabled_targets():
+    for target, dev in tvm.testing.enabled_targets():
         x = np.random.uniform(size=in_shape).astype("int32")
-        tvm_out = get_tvm_output(model, x, target, ctx, ref_shape, "int32")
+        tvm_out = get_tvm_output(model, x, target, dev, ref_shape, "int32")
         tvm.testing.assert_allclose(ref_shape, tvm_out)
 
 
@@ -437,8 +460,8 @@ def _test_power_iteration(x_shape, y_shape):
 
     model = helper.make_model(graph, producer_name="power_test")
 
-    for target, ctx in tvm.testing.enabled_targets():
-        tvm_out = get_tvm_output(model, [x, y], target, ctx, np_res.shape)
+    for target, dev in tvm.testing.enabled_targets():
+        tvm_out = get_tvm_output(model, [x, y], target, dev, np_res.shape)
         tvm.testing.assert_allclose(np_res, tvm_out, rtol=1e-5, atol=1e-5)
 
 
@@ -500,7 +523,7 @@ def test_squeeze():
 
     model = helper.make_model(graph, producer_name="squeeze_test")
     x = np.random.uniform(size=in_shape).astype("float32")
-    verify_with_ort_with_inputs(model, [x], [out_shape])
+    verify_with_ort_with_inputs(model, [x], [out_shape], opset=11)
 
 
 @tvm.testing.uses_gpu
@@ -538,7 +561,7 @@ def test_unsqueeze():
     )
 
     model = helper.make_model(graph, producer_name="squeeze_test")
-    verify_with_ort(model, [in_shape])
+    verify_with_ort(model, [in_shape], opset=11)
 
 
 def verify_gather(in_shape, indices, axis, dtype):
@@ -575,6 +598,53 @@ def test_gather():
     verify_gather((2, 2), [[[1, 0], [0, 1]]], 1, "int32")
     verify_gather((3, 3, 3), [[[1, 0]]], -1, "int32")
     verify_gather((4, 3, 5, 6), [[2, 1, 0, 0]], 0, "float32")
+
+
+@tvm.testing.uses_gpu
+def test_dynamic_gather():
+    dtype = "float32"
+    in_shape = [2, 2]
+    indices = 1
+    axis = 1
+    x = np.random.uniform(size=in_shape).astype(dtype)
+    indices = np.array(indices, dtype="int64")
+    out_np = np.take(x, indices, axis=axis)
+
+    indices = helper.make_node(
+        "Constant",
+        inputs=[],
+        outputs=["indices"],
+        value=onnx.helper.make_tensor(
+            name="const_indices",
+            data_type=onnx.TensorProto.INT64,
+            dims=[],
+            vals=[1],
+        ),
+    )
+    y = helper.make_node("Gather", ["in", "indices"], ["out"], axis=axis)
+
+    graph = helper.make_graph(
+        [indices, y],
+        "gather_test",
+        inputs=[
+            helper.make_tensor_value_info(
+                "in", mapping.NP_TYPE_TO_TENSOR_TYPE[np.dtype(dtype)], ["?", "?"]
+            ),
+        ],
+        outputs=[
+            helper.make_tensor_value_info(
+                "out", mapping.NP_TYPE_TO_TENSOR_TYPE[np.dtype(dtype)], ["?"] * len(out_np.shape)
+            )
+        ],
+    )
+    model = helper.make_model(graph, producer_name="dynamic_gather_test")
+
+    mod, params = relay.frontend.from_onnx(model)
+
+    for target, device in tvm.testing.enabled_targets():
+        ex = relay.create_executor("vm", mod=mod, device=device, target=target)
+        result = ex.evaluate()(x, **params)
+        tvm.testing.assert_allclose(out_np, result.numpy(), rtol=1e-5, atol=1e-5)
 
 
 def verify_gatherelements(in_shape, indices, axis):
@@ -755,8 +825,7 @@ def _test_slice_iteration_v10(indata, outdata, **attrs):
     verify_with_ort_with_inputs(model, [indata], opset=10, freeze_params=True, use_vm=True)
 
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_slice():
     x = np.random.randn(20, 10, 5).astype(np.float32)
     _test_slice_iteration_v1(x, x[0:3, 0:10], starts=(0, 0), ends=(3, 10), axes=(0, 1))
@@ -943,11 +1012,15 @@ def test_isnan():
     _test_finite_ops((2, 4, 5, 6), np.isnan, {}, "float32", "IsNaN", {})
 
 
-def verify_gather_nd(in_shape, indices, out_shape, dtype="float32"):
+def verify_gather_nd(in_shape, indices, out_shape, dtype="float32", batch_dims=0, opset=11):
     x = np.random.uniform(size=in_shape).astype(dtype)
     indices = np.array(indices, dtype="int64")
 
     y = helper.make_node("GatherND", ["in", "indices"], ["out"])
+
+    if opset >= 12:
+        batch_dims_attr = helper.make_attribute("batch_dims", batch_dims)
+        y.attribute.append(batch_dims_attr)
 
     graph = helper.make_graph(
         [y],
@@ -965,7 +1038,7 @@ def verify_gather_nd(in_shape, indices, out_shape, dtype="float32"):
         ],
     )
     model = helper.make_model(graph, producer_name="gather_test")
-    verify_with_ort_with_inputs(model, [x, indices], [out_shape])
+    verify_with_ort_with_inputs(model, [x, indices], [out_shape], opset=opset)
 
 
 @tvm.testing.uses_gpu
@@ -975,9 +1048,18 @@ def test_gather_nd():
     verify_gather_nd([2, 2, 2], [[0, 1], [1, 0]], [2, 2])
     verify_gather_nd([2, 2, 2], [[[0, 1]], [[1, 0]]], [2, 1, 2])
 
+    if is_version_greater_than("1.6.0"):
+        verify_gather_nd([2, 2, 2], [[1], [0]], [2, 2], batch_dims=1, opset=12)
+        verify_gather_nd(
+            (3, 2, 2, 3, 4),
+            np.random.randint(low=0, high=2, size=(3, 2, 3), dtype="int64"),
+            (3, 2),
+            batch_dims=2,
+            opset=12,
+        )
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+
+@tvm.testing.uses_gpu
 def test_onehot():
     indices_shape = [10]
     indices_array = np.random.randint(low=0, high=9, size=indices_shape, dtype="int32")
@@ -1001,27 +1083,28 @@ def test_onehot():
     model = helper.make_model(graph, producer_name="onehot_test")
 
     # TODO(jwfromm): Replace test against np with test against onnxrt once we update versions.
-    for target, ctx in tvm.testing.enabled_targets():
+    for target, dev in tvm.testing.enabled_targets():
         tvm_out = get_tvm_output_with_vm(
-            model, [indices_array, np.array([depth]).astype("int32"), values], target, ctx
+            model, [indices_array, np.array([depth]).astype("int32"), values], target, dev
         )
         tvm.testing.assert_allclose(out_np, tvm_out, rtol=1e-5, atol=1e-5)
 
 
-def verify_gemm(a_shape, b_shape, c_shape=None, freeze_params=False):
+def verify_gemm(a_shape, b_shape, c_shape=None, freeze_params=False, dtype="float32"):
     out_shape = [a_shape[0], b_shape[1]]
-    a_array = np.random.uniform(size=a_shape).astype("float32")
-    b_array = np.random.uniform(size=b_shape).astype("float32")
+    a_array = np.random.uniform(size=a_shape).astype(dtype)
+    b_array = np.random.uniform(size=b_shape).astype(dtype)
     input_names = ["a", "b"]
+    ONNX_DTYPE = mapping.NP_TYPE_TO_TENSOR_TYPE[np.dtype(dtype)]
     input_nodes = [
-        helper.make_tensor_value_info("a", TensorProto.FLOAT, list(a_shape)),
-        helper.make_tensor_value_info("b", TensorProto.FLOAT, list(b_shape)),
+        helper.make_tensor_value_info("a", ONNX_DTYPE, list(a_shape)),
+        helper.make_tensor_value_info("b", ONNX_DTYPE, list(b_shape)),
     ]
     input_values = [a_array, b_array]
     if c_shape is not None:
-        c_array = np.random.uniform(size=c_shape).astype("float32")
+        c_array = np.random.uniform(size=c_shape).astype(dtype)
         input_names.append("c")
-        input_nodes.append(helper.make_tensor_value_info("c", TensorProto.FLOAT, list(c_shape)))
+        input_nodes.append(helper.make_tensor_value_info("c", ONNX_DTYPE, list(c_shape)))
         input_values.append(c_array)
 
     gemm_node = helper.make_node("Gemm", input_names, ["out"])
@@ -1030,11 +1113,18 @@ def verify_gemm(a_shape, b_shape, c_shape=None, freeze_params=False):
         [gemm_node],
         "gemm_test",
         inputs=input_nodes,
-        outputs=[helper.make_tensor_value_info("out", TensorProto.FLOAT, list(out_shape))],
+        outputs=[helper.make_tensor_value_info("out", ONNX_DTYPE, list(out_shape))],
     )
 
     model = helper.make_model(graph, producer_name="gemm_test")
-    verify_with_ort_with_inputs(model, input_values, freeze_params=freeze_params)
+    atol = 1e-5
+    rtol = 1e-5
+    if dtype == "float16":
+        atol = 1e-3
+        rtol = 1e-3
+    verify_with_ort_with_inputs(
+        model, input_values, freeze_params=freeze_params, dtype=dtype, atol=atol, rtol=rtol
+    )
 
 
 @tvm.testing.uses_gpu
@@ -1042,6 +1132,7 @@ def test_gemm():
     verify_gemm(a_shape=(4, 3), b_shape=(3, 4))
     verify_gemm(a_shape=(4, 3), b_shape=(3, 4), c_shape=(4,))
     verify_gemm(a_shape=(4, 3), b_shape=(3, 4), c_shape=(4,), freeze_params=True)
+    verify_gemm(a_shape=(4, 3), b_shape=(3, 4), c_shape=(4,), freeze_params=True, dtype="float16")
 
 
 @tvm.testing.uses_gpu
@@ -1069,7 +1160,7 @@ def test_matmul():
     verify_with_ort_with_inputs(model, [a_array, b_array])
 
 
-def verify_batch_matmul(a_shape, b_shape, out_shape, target, ctx):
+def verify_batch_matmul(a_shape, b_shape, out_shape, target, dev):
     a_array = np.random.uniform(size=a_shape).astype("float32")
     b_array = np.random.uniform(size=b_shape).astype("float32")
 
@@ -1089,19 +1180,20 @@ def verify_batch_matmul(a_shape, b_shape, out_shape, target, ctx):
     verify_with_ort_with_inputs(model, [a_array, b_array], use_vm=True, targets=[target])
 
 
-# TODO(mbrookhart): enable cuda once VM supports heterogenous execution
-@tvm.testing.parametrize_targets("llvm")
-def test_batch_matmul(target, ctx):
-    verify_batch_matmul((2, 3, 4, 3), (2, 3, 3, 4), (2, 3, 4, 4), target, ctx)
-    verify_batch_matmul((2, 4, 3), (3, 4), (2, 4, 4), target, ctx)
-    verify_batch_matmul((2, 3, 4, 3), (3, 4), (2, 3, 4, 4), target, ctx)
+@tvm.testing.uses_gpu
+def test_batch_matmul(target, dev):
+    verify_batch_matmul((2, 3, 4, 3), (2, 3, 3, 4), (2, 3, 4, 4), target, dev)
+    verify_batch_matmul((2, 4, 3), (3, 4), (2, 4, 4), target, dev)
+    verify_batch_matmul((2, 3, 4, 3), (3, 4), (2, 3, 4, 4), target, dev)
     # Test implicit broadcasting.
-    verify_batch_matmul((4, 3), (2, 3, 4), (2, 4, 4), target, ctx)
-    verify_batch_matmul((2, 4, 3), (1, 3, 4), (2, 4, 4), target, ctx)
-    verify_batch_matmul((1, 4, 3), (2, 3, 4), (2, 4, 4), target, ctx)
+    verify_batch_matmul((4, 3), (2, 3, 4), (2, 4, 4), target, dev)
+    verify_batch_matmul((2, 4, 3), (1, 3, 4), (2, 4, 4), target, dev)
+    verify_batch_matmul((1, 4, 3), (2, 3, 4), (2, 4, 4), target, dev)
+    verify_batch_matmul((4, 32, 16), (16, 32), (4, 32, 32), target, dev)
+    verify_batch_matmul((4, 32, 16, 32), (32, 16), (4, 32, 16, 16), target, dev)
 
 
-def verify_simple_dynamic_model(a_shape, b_shape, target, ctx):
+def verify_simple_dynamic_model(a_shape, b_shape, target, dev):
     def verify_model(ex, a_shape, b_shape):
         a_array = np.random.uniform(size=a_shape).astype("float32")
         b_array = np.random.uniform(size=b_shape).astype("float32")
@@ -1110,7 +1202,7 @@ def verify_simple_dynamic_model(a_shape, b_shape, target, ctx):
         # relu
         out_np[out_np < 0] = 0
 
-        tvm_out = ex.evaluate()(a_array, b_array).asnumpy()
+        tvm_out = ex.evaluate()(a_array, b_array).numpy()
         tvm.testing.assert_allclose(out_np, tvm_out, rtol=1e-5, atol=1e-5)
 
     mul_node = helper.make_node("MatMul", ["a", "b"], ["out"])
@@ -1137,19 +1229,18 @@ def verify_simple_dynamic_model(a_shape, b_shape, target, ctx):
     b_anys = [relay.Any()] * len(b_shape)
 
     mod, params = relay.frontend.from_onnx(model, {"a": a_anys, "b": b_anys})
-
-    ex = relay.create_executor("vm", mod=mod, ctx=ctx, target=target)
+    ex = relay.create_executor("vm", mod=mod, device=dev, target=target)
     verify_model(ex, a_shape, b_shape)
     verify_model(ex, [a * 2 for a in a_shape], [b * 2 for b in b_shape])
     verify_model(ex, [a * 3 for a in a_shape], [b * 3 for b in b_shape])
 
 
-# TODO(mbrookhart): enable cuda once VM supports heterogenous execution
+# TODO(mbrookhart, electriclilies): Add CUDA as a target once batch matmul is fixed
 @tvm.testing.parametrize_targets("llvm")
-def test_batch_matmul_dynamic_model(target, ctx):
-    verify_simple_dynamic_model((2, 3, 4, 3), (2, 3, 3, 4), target, ctx)
-    verify_simple_dynamic_model((2, 4, 3), (3, 4), target, ctx)
-    verify_simple_dynamic_model((2, 3, 4, 3), (3, 4), target, ctx)
+def test_batch_matmul_dynamic_model(target, dev):
+    verify_simple_dynamic_model((2, 3, 4, 3), (2, 3, 3, 4), target, dev)
+    verify_simple_dynamic_model((2, 4, 3), (3, 4), target, dev)
+    verify_simple_dynamic_model((2, 3, 4, 3), (3, 4), target, dev)
 
 
 def verify_lrn(shape, nsize, dtype, alpha=None, beta=None, bias=None):
@@ -1282,11 +1373,12 @@ def verify_upsample3d_trilinear():
     y = helper.make_node("Upsample", ["in", "scales"], ["out"], mode="linear")
     scales = [1.0, 1.0, 2.0, 2.0, 2.0]
     in_array = np.random.uniform(size=in_shape).astype(np.float32)
-    out_array = tvm.topi.testing.trilinear_resize3d_python(
+    out_array = tvm.topi.testing.resize3d_python(
         in_array,
-        (3 * scale, 3 * scale, 3 * scale),
+        (scale, scale, scale),
         "NCDHW",
-        coordinate_transformation_mode="half_pixel",
+        "linear",
+        coordinate_transformation_mode="asymmetric",
     )
 
     ref_array = np.array(scales)
@@ -1312,13 +1404,12 @@ def verify_upsample3d_trilinear():
     model = helper.make_model(graph, producer_name="upsample_trilinear_test")
     # TODO(jwfromm): Trilinear upsampling not supported in 1.0.0 onnxruntime.
     # Replace topi comparison with verify_with_ort once we update.
-    for target, ctx in tvm.testing.enabled_targets():
-        tvm_out = get_tvm_output(model, in_array, target, ctx, out_shape, "float32")
+    for target, dev in tvm.testing.enabled_targets():
+        tvm_out = get_tvm_output(model, in_array, target, dev, out_shape, "float32")
         tvm.testing.assert_allclose(out_array, tvm_out, rtol=1e-5, atol=1e-5)
 
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_upsample():
     verify_upsample_nearest()
     verify_upsample_bilinear()
@@ -1495,7 +1586,8 @@ def verify_argreduce(input_dim, op_name, axis=None, keepdims=None):
     verify_with_ort_with_inputs(model, [a_np1])
 
 
-@tvm.testing.uses_gpu
+# TODO (mbrookhart, electriclilies) Fix argmin on GPU and enable this test
+# @tvm.testing.uses_gpu
 def test_forward_arg_min_max():
     """Verify argmin and argmax"""
     verify_argreduce([3, 4, 4], "ArgMin")
@@ -1538,8 +1630,7 @@ def verify_constantofshape(input_dim, value, dtype):
     verify_with_ort_with_inputs(model, [input_np], use_vm=True)
 
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_constantofshape():
     verify_constantofshape((2, 3, 4, 5), 10, "float32")
     verify_constantofshape((3, 3), 0, "int32")
@@ -1584,7 +1675,7 @@ def verify_pad_v11(indata, pads, mode="constant", value=0.0):
     pads = np.array(pads)
     #  onnx graph
     if mode in ["edge", "reflect"]:
-        inputs = [indata, pads]
+        inputs = [indata]
         outdata = np.pad(indata, pad_width=np_pads, mode=mode)
         node = helper.make_node("Pad", inputs=["input", "pads"], outputs=["output"], mode=mode)
         graph = helper.make_graph(
@@ -1600,7 +1691,7 @@ def verify_pad_v11(indata, pads, mode="constant", value=0.0):
             ],
         )
     else:
-        inputs = [indata, pads, np.array([value]).astype("float32")]
+        inputs = [indata]
         outdata = np.pad(indata, pad_width=np_pads, mode="constant", constant_values=value)
         node = helper.make_node(
             "Pad", inputs=["input", "pads", "constant_value"], outputs=["output"], mode="constant"
@@ -1625,8 +1716,7 @@ def verify_pad_v11(indata, pads, mode="constant", value=0.0):
     verify_with_ort_with_inputs(model, inputs, opset=11, use_vm=True)
 
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_pad():
     verify_pad(np.random.randn(2, 2).astype(np.float32), [0, 1, 0, 0], "constant", 0.0)
     verify_pad(np.random.randn(2, 3).astype(np.float32), [1, 0, 0, 1], "constant", 0.0)
@@ -1663,7 +1753,7 @@ def verify_reduce_func(func, data, axis, keepdims):
 
     model = helper.make_model(graph, producer_name="reduce_test")
 
-    verify_with_ort_with_inputs(model, [data], [outshape])
+    verify_with_ort_with_inputs(model, [data], [outshape], opset=11)
 
 
 @tvm.testing.uses_gpu
@@ -2118,8 +2208,7 @@ def verify_tile_v6(indata, repeats, outdata):
     verify_with_ort_with_inputs(model, [indata, repeats], use_vm=True, opset=6)
 
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_tile():
     x = np.random.rand(2, 3, 4, 5).astype(np.float32)
     repeats = np.random.randint(low=1, high=10, size=(np.ndim(x),)).astype(np.int64)
@@ -2172,7 +2261,7 @@ def verify_where(condition, x, y, dtype, outdata, dynamic=False):
 
 @tvm.testing.uses_gpu
 def test_where():
-    condition = np.array([[1, 0], [1, 1]], dtype=np.bool)
+    condition = np.array([[1, 0], [1, 1]], dtype=bool)
     x = np.array([[1, 2], [3, 4]], dtype=np.int64)
     y = np.array([[9, 8], [7, 6]], dtype=np.int64)
     outdata = np.where(condition, x, y)
@@ -2193,7 +2282,7 @@ def test_where():
     outdata = np.where(condition, x, y)
     verify_where(condition, x, y, TensorProto.FLOAT, outdata)
 
-    condition = np.array(1, dtype=np.bool)
+    condition = np.array(1, dtype=bool)
     x = np.array([[1, 2], [3, 4]], dtype=np.float32)
     y = np.array([[5, 6], [7, 8]], dtype=np.float32)
     outdata = np.where(condition, x, y)
@@ -2291,8 +2380,7 @@ def test_batch_norm():
     verify_batch_norm([16, 16, 10, 10])
 
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_batch_norm_dynamic_subgraph():
     def verify_batch_norm_dynamic_subgraph(in_shape, o_shape):
 
@@ -2333,6 +2421,7 @@ def verify_conv(
     kernel_shape,
     strides,
     dilations,
+    group=1,
     auto_pad="NOTSET",
     unset_pad=False,
 ):
@@ -2345,19 +2434,24 @@ def verify_conv(
             # Default values for other attributes:
             strides=strides,
             dilations=dilations,
-            # groups=1
+            group=group,
         )
     elif padding is None:
+        ## autopadding with unset default attributes
+        kwargs = {}
+        if not all([s == 1 for s in strides]):
+            kwargs["strides"] = strides
+        if not all([d == 1 for d in dilations]):
+            kwargs["dilations"] = dilations
+
         node = helper.make_node(
             "Conv",
             inputs=["x", "W"],
             outputs=["y"],
-            kernel_shape=kernel_shape,
             # Default values for other attributes:
-            strides=strides,
-            dilations=dilations,
-            # groups=1
             auto_pad=auto_pad,
+            group=group,
+            **kwargs,
         )
     else:
         node = helper.make_node(
@@ -2368,7 +2462,7 @@ def verify_conv(
             # Default values for other attributes:
             strides=strides,
             dilations=dilations,
-            # groups=1
+            group=group,
             pads=padding,
         )
 
@@ -2403,7 +2497,7 @@ def test_conv():
             repeat(1, D),
             repeat(1, D),
         )
-        # Convolution with assymetric padding
+        # Convolution with asymmetric padding
         verify_conv(
             (1, 1) + repeat(5, D),
             (1, 1) + repeat(3, D),
@@ -2478,11 +2572,24 @@ def test_conv():
             repeat(2, D),
         )
 
+    # TODO(jwfromm): Merge with other tests once group_conv3d is supported.
+    for D in [1, 2]:
+        # Group Convolution
+        verify_conv(
+            (1, 8) + repeat(5, D),
+            (8, 1) + repeat(3, D),
+            (1, 8) + repeat(5, D),
+            2 * repeat(1, D),
+            repeat(3, D),
+            repeat(1, D),
+            repeat(1, D),
+            group=8,
+        )
+
 
 def verify_convtranspose_with_padding(
     x_shape,
     w_shape,
-    y_shape,
     padding,
     kernel_shape,
     strides,
@@ -2518,12 +2625,12 @@ def verify_convtranspose_with_padding(
             helper.make_tensor_value_info("x", TensorProto.FLOAT, list(x_shape)),
             helper.make_tensor_value_info("W", TensorProto.FLOAT, list(w_shape)),
         ],
-        outputs=[helper.make_tensor_value_info("y", TensorProto.FLOAT, list(y_shape))],
+        outputs=[helper.make_tensor_value_info("y", TensorProto.FLOAT, ["?"] * len(x_shape))],
     )
 
     model = helper.make_model(graph, producer_name="convtranspose_pad_test")
 
-    verify_with_ort(model, [x_shape, w_shape], [y_shape], use_vm=True, convert_to_static=True)
+    verify_with_ort(model, [x_shape, w_shape], use_vm=True, convert_to_static=True)
 
 
 def verify_convtranspose(x_shape, w_shape, y_shape, p, group=1):
@@ -2551,7 +2658,7 @@ def verify_convtranspose(x_shape, w_shape, y_shape, p, group=1):
     )
 
     model = helper.make_model(graph, producer_name="convtranspose_test")
-    verify_with_ort(model, [x_shape, w_shape], y_shape)
+    verify_with_ort(model, [x_shape, w_shape], y_shape, opset=11)
 
 
 @tvm.testing.uses_gpu
@@ -2568,14 +2675,12 @@ def test_convtranspose():
     def repeat(N, D):
         return tuple([N for _ in range(D)])
 
-    # TODO(mbrookhart): onnxruntime in CI only supports 2D,
-    # find something else to test 1D and 3D against
-    for D in [2]:
+    # Once onnxruntime update is complete
+    for D in [1, 2, 3]:
         # Convolution with padding
         verify_convtranspose_with_padding(
             (1, 1) + repeat(5, D),
             (1, 1) + repeat(3, D),
-            (1, 1) + repeat(5, D),
             2 * repeat(1, D),
             repeat(3, D),
             repeat(1, D),
@@ -2585,17 +2690,25 @@ def test_convtranspose():
         verify_convtranspose_with_padding(
             (1, 1) + repeat(5, D),
             (1, 1) + repeat(3, D),
-            (1, 1) + repeat(7, D),
             2 * repeat(0, D),
             repeat(3, D),
             repeat(1, D),
             repeat(1, D),
         )
+        # Convolution with unset padding
+        verify_convtranspose_with_padding(
+            (1, 1) + repeat(5, D),
+            (1, 1) + repeat(3, D),
+            2 * repeat(0, D),
+            repeat(3, D),
+            repeat(1, D),
+            repeat(1, D),
+            True,
+        )
         # Convolution with autopadding
         verify_convtranspose_with_padding(
             (1, 1) + repeat(5, D),
             (1, 1) + repeat(3, D),
-            (1, 1) + repeat(5, D),
             None,
             repeat(3, D),
             repeat(1, D),
@@ -2606,29 +2719,16 @@ def test_convtranspose():
         verify_convtranspose_with_padding(
             (1, 1) + repeat(5, D),
             (1, 1) + repeat(3, D),
-            (1, 1) + repeat(7, D),
             None,
             repeat(3, D),
             repeat(1, D),
             repeat(1, D),
             auto_pad="VALID",
         )
-        # Convolution with unset padding
-        verify_convtranspose_with_padding(
-            (1, 1) + repeat(5, D),
-            (1, 1) + repeat(3, D),
-            (1, 1) + repeat(7, D),
-            2 * repeat(0, D),
-            repeat(3, D),
-            repeat(1, D),
-            repeat(1, D),
-            True,
-        )
         # Convolution with non uniform stride
         verify_convtranspose_with_padding(
             (1, 1) + repeat(5, D),
             (1, 1) + repeat(3, D),
-            (1, 1) + repeat(9, D),
             None,
             repeat(3, D),
             repeat(2, D),
@@ -2640,7 +2740,6 @@ def test_convtranspose():
         # verify_convtranspose_with_padding(
         #     (1, 1) + repeat(5, D),
         #     (1, 1) + repeat(3, D),
-        #     (1, 1) + repeat(5, D),
         #     2 * repeat(2, D),
         #     repeat(3, D),
         #     repeat(1, D),
@@ -2650,7 +2749,7 @@ def test_convtranspose():
 
 @tvm.testing.uses_gpu
 def test_unsqueeze_constant():
-    from torch.nn import Linear, Sequential, Module
+    from torch.nn import Linear, Module, Sequential
 
     class Flatten(Module):
         def forward(self, input):
@@ -2701,7 +2800,7 @@ def verify_pooling(x_shape, kernel_shape, strides, pads, out_shape, mode, auto_p
     )
 
     model = helper.make_model(graph, producer_name="pooling_test")
-    verify_with_ort(model, [x_shape], [out_shape], use_vm=True, convert_to_static=True)
+    verify_with_ort(model, [x_shape], [out_shape], use_vm=False, convert_to_static=True)
 
 
 @tvm.testing.uses_gpu
@@ -2786,6 +2885,44 @@ def test_pooling():
             mode=mode,
             auto_pad="SAME_UPPER",
         )
+
+
+def verify_global_pooling(x_shape, mode):
+    out_shape = x_shape[:2] + [1] * (len(x_shape) - 2)
+
+    if mode == "max":
+        node_type = "GlobalMaxPool"
+    elif mode == "average":
+        node_type = "GlobalAveragePool"
+    else:
+        raise ValueError("Pool method {} is not supported.".format(mode))
+
+    pool_node = helper.make_node(node_type, inputs=["x"], outputs=["y"])
+
+    graph = helper.make_graph(
+        [pool_node],
+        "global_pooling_test",
+        inputs=[helper.make_tensor_value_info("x", TensorProto.FLOAT, list(x_shape))],
+        outputs=[helper.make_tensor_value_info("y", TensorProto.FLOAT, list(out_shape))],
+    )
+
+    model = helper.make_model(graph, producer_name="global_pooling_test")
+    verify_with_ort(model, [x_shape], [out_shape], use_vm=False, convert_to_static=True)
+
+
+@tvm.testing.uses_gpu
+def test_global_pooling():
+    # Test each pooling mode across all N-D inputs.
+    for mode in ["average", "max"]:
+        # 1D Pooling (NCW)
+        verify_global_pooling([1, 8, 8], mode)
+        verify_global_pooling([4, 1, 4], mode)
+        # 2D Pooling (NCHW)
+        verify_global_pooling([1, 8, 8, 8], mode)
+        verify_global_pooling([4, 1, 6, 4], mode)
+        # 3D Pooling (NCDHW)
+        verify_global_pooling([1, 8, 6, 8, 8], mode)
+        verify_global_pooling([4, 1, 2, 6, 4], mode)
 
 
 def verify_mod(x_shape, y_shape, fmod, out_shape, dtype="float32"):
@@ -3040,92 +3177,112 @@ def verify_rnn(
     use_initial_state=False,
     use_peep=False,
     linear_before_reset=False,
+    directions=1,
 ):
     if rnn_type == "LSTM":
         multiplier = 4
     elif rnn_type == "GRU":
         multiplier = 3
     else:
-        raise NotImplementedError("%s RNNs not yet supported." % rnn_type)
-    x_np = np.random.uniform(size=(seq_length, batch_size, input_size)).astype("float32")
-    w_np = np.random.uniform(size=(1, multiplier * hidden_size, input_size)).astype("float32")
-    r_np = np.random.uniform(size=(1, multiplier * hidden_size, hidden_size)).astype("float32")
-    input_names = ["X", "W", "R"]
-    input_tensors = [
-        helper.make_tensor_value_info("X", TensorProto.FLOAT, list(x_np.shape)),
-        helper.make_tensor_value_info("W", TensorProto.FLOAT, list(w_np.shape)),
-        helper.make_tensor_value_info("R", TensorProto.FLOAT, list(r_np.shape)),
-    ]
-    input_values = [x_np, w_np, r_np]
+        raise NotImplementedError(f"{rnn_type} RNNs not yet supported.")
 
-    if use_bias:
-        b_np = np.random.uniform(size=(1, multiplier * 2 * hidden_size)).astype("float32")
-        input_names.append("B")
-        input_tensors.append(
-            helper.make_tensor_value_info("B", TensorProto.FLOAT, [1, multiplier * 2 * hidden_size])
+    if directions not in [1, 2]:
+        raise ValueError(f"Direction should be either 1 or 2 (for bidirectional LSTMs)")
+
+    def get_inputs():
+        input_names = []
+        input_values = []
+        input_tensors = []
+
+        def register(np_arr, name, shape=None):
+            input_values.append(np_arr)
+            input_names.append(name)
+
+            # Map of numpy dtypes to the protobuf equivalent
+            dtype_map = {
+                "float32": TensorProto.FLOAT,
+                "int32": TensorProto.INT32,
+                "int8": TensorProto.INT8,
+            }
+
+            if np_arr.dtype.name not in dtype_map:
+                raise ValueError(f"Unknown dtype we don't know how to handle {np.dtype.name}")
+            if shape is None:
+                shape = list(np_arr.shape)
+            proto_type = dtype_map[np_arr.dtype.name]
+            input_tensors.append(helper.make_tensor_value_info(name, proto_type, shape))
+
+        x_np = np.random.uniform(size=(seq_length, batch_size, input_size)).astype("float32")
+        w_np = np.random.uniform(size=(directions, multiplier * hidden_size, input_size)).astype(
+            "float32"
         )
-        input_values.append(b_np)
-
-    if use_initial_state:
-        assert use_bias == True, "Initial states must have bias specified."
-        sequence_np = np.repeat(seq_length, batch_size).astype("int32")
-        input_names.append("sequence_lens")
-        input_tensors.append(
-            helper.make_tensor_value_info("sequence_lens", TensorProto.INT32, [batch_size])
+        r_np = np.random.uniform(size=(directions, multiplier * hidden_size, hidden_size)).astype(
+            "float32"
         )
-        input_values.append(sequence_np)
+        register(x_np, "X")
+        register(w_np, "W")
+        register(r_np, "R")
 
-        initial_h_np = np.random.uniform(size=(1, batch_size, hidden_size)).astype("float32")
-        input_names.append("initial_h")
-        input_tensors.append(
-            helper.make_tensor_value_info(
-                "initial_h", TensorProto.FLOAT, [1, batch_size, hidden_size]
+        if use_bias:
+            b_np = np.random.uniform(size=(directions, multiplier * 2 * hidden_size)).astype(
+                "float32"
             )
-        )
-        input_values.append(initial_h_np)
+            register(b_np, "B")
+
+        if use_initial_state:
+            assert use_bias == True, "Initial states must have bias specified."
+            sequence_np = np.repeat(seq_length, batch_size).astype("int32")
+            register(sequence_np, "sequence_lens")
+
+            initial_h_np = np.random.uniform(size=(directions, batch_size, hidden_size)).astype(
+                "float32"
+            )
+            register(initial_h_np, "initial_h")
+
+            if rnn_type == "LSTM":
+                initial_c_np = np.random.uniform(size=(directions, batch_size, hidden_size)).astype(
+                    "float32"
+                )
+                register(initial_c_np, "initial_c")
+
+        if use_peep and rnn_type == "LSTM":
+            assert use_initial_state == True, "Peepholes require initial state to be specified."
+            p_np = np.random.uniform(size=(directions, 3 * hidden_size)).astype("float32")
+            register(p_np, "P")
+
+        return input_names, input_tensors, input_values
+
+    input_names, input_tensors, input_values = get_inputs()
+
+    def get_outputs():
+        output_names = []
+        graph_outputs = []
+        output_shapes = []
+
+        def register(name, shape, proto_type):
+            output_names.append(name)
+            graph_outputs.append(helper.make_tensor_value_info(name, proto_type, list(shape)))
+            output_shapes.append(list(shape))
+
+        register("Y", [seq_length, directions, batch_size, hidden_size], TensorProto.FLOAT)
+        register("Y_h", [directions, batch_size, hidden_size], TensorProto.FLOAT)
 
         if rnn_type == "LSTM":
-            initial_c_np = np.random.uniform(size=(1, batch_size, hidden_size)).astype("float32")
-            input_names.append("initial_c")
-            input_tensors.append(
-                helper.make_tensor_value_info(
-                    "initial_c", TensorProto.FLOAT, [1, batch_size, hidden_size]
-                )
-            )
-            input_values.append(initial_c_np)
+            register("Y_c", [directions, batch_size, hidden_size], TensorProto.FLOAT)
 
-    if use_peep and rnn_type == "LSTM":
-        assert use_initial_state == True, "Peepholes require initial state to be specified."
-        p_np = np.random.uniform(size=(1, 3 * hidden_size)).astype("float32")
-        input_names.append("P")
-        input_tensors.append(
-            helper.make_tensor_value_info("P", TensorProto.FLOAT, [1, 3 * hidden_size])
-        )
-        input_values.append(p_np)
+        return output_names, graph_outputs, output_shapes
 
-    Y_shape = [seq_length, 1, batch_size, hidden_size]
-    Y_h_shape = [1, batch_size, hidden_size]
-    outputs = ["Y", "Y_h"]
-    graph_outputs = [
-        helper.make_tensor_value_info("Y", TensorProto.FLOAT, list(Y_shape)),
-        helper.make_tensor_value_info("Y_h", TensorProto.FLOAT, list(Y_h_shape)),
-    ]
-    output_shapes = [Y_shape, Y_h_shape]
-
-    if rnn_type == "LSTM":
-        Y_c_shape = [1, batch_size, hidden_size]
-        outputs.append("Y_c")
-        graph_outputs.append(
-            helper.make_tensor_value_info("Y_c", TensorProto.FLOAT, list(Y_c_shape))
-        )
-        output_shapes.append(Y_c_shape)
+    output_names, graph_outputs, output_shapes = get_outputs()
 
     rnn_node = helper.make_node(
-        rnn_type, inputs=input_names, outputs=outputs, hidden_size=hidden_size
+        rnn_type, inputs=input_names, outputs=output_names, hidden_size=hidden_size
     )
     if activations is not None:
         activations_attr = helper.make_attribute("activations", activations)
         rnn_node.attribute.append(activations_attr)
+    if directions == 2:
+        direction_attr = helper.make_attribute("direction", "bidirectional")
+        rnn_node.attribute.append(direction_attr)
     if alphas is not None:
         alphas_attr = helper.make_attribute("activation_alpha", alphas)
         rnn_node.attribute.append(alphas_attr)
@@ -3145,175 +3302,252 @@ def verify_rnn(
 
 @tvm.testing.uses_gpu
 def test_lstm():
-    # No bias.
-    verify_rnn(
-        seq_length=2, batch_size=1, input_size=16, hidden_size=32, use_bias=False, rnn_type="LSTM"
-    )
-    # large batch.
-    verify_rnn(
-        seq_length=4, batch_size=8, input_size=16, hidden_size=32, use_bias=True, rnn_type="LSTM"
-    )
-    # Non power of two.
-    verify_rnn(
-        seq_length=3, batch_size=3, input_size=16, hidden_size=40, use_bias=True, rnn_type="LSTM"
-    )
-    # Long sequence.
-    verify_rnn(
-        seq_length=8, batch_size=1, input_size=16, hidden_size=32, use_bias=True, rnn_type="LSTM"
-    )
-    # Large hidden.
-    verify_rnn(
-        seq_length=2, batch_size=1, input_size=16, hidden_size=128, use_bias=True, rnn_type="LSTM"
-    )
-    # Large input.
-    verify_rnn(
-        seq_length=2, batch_size=1, input_size=64, hidden_size=32, use_bias=True, rnn_type="LSTM"
-    )
+    for directions in [1, 2]:
+        # No bias.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=False,
+            rnn_type="LSTM",
+            directions=directions,
+        )
+        # large batch.
+        verify_rnn(
+            seq_length=4,
+            batch_size=8,
+            input_size=16,
+            hidden_size=32,
+            use_bias=True,
+            rnn_type="LSTM",
+            directions=directions,
+        )
+        # Non power of two.
+        verify_rnn(
+            seq_length=3,
+            batch_size=3,
+            input_size=16,
+            hidden_size=40,
+            use_bias=True,
+            rnn_type="LSTM",
+            directions=directions,
+        )
+        # Long sequence.
+        verify_rnn(
+            seq_length=8,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=True,
+            rnn_type="LSTM",
+            directions=directions,
+        )
+        # Large hidden.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=128,
+            use_bias=True,
+            rnn_type="LSTM",
+            directions=directions,
+        )
+        # Large input.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=64,
+            hidden_size=32,
+            use_bias=True,
+            rnn_type="LSTM",
+            directions=directions,
+        )
 
-    # Different activation testing.
-    # Default value hardsigmoid.
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=False,
-        activations=["HardSigmoid", "Tanh", "Tanh"],
-        rnn_type="LSTM",
-    )
-    # Multiple parameterized activations.
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=False,
-        activations=["HardSigmoid", "LeakyRelu", "Tanh"],
-        alphas=[2.0, 0.5],
-        betas=[0.3],
-        rnn_type="LSTM",
-    )
-    # All parameterized with new Affine activation.
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=False,
-        activations=["HardSigmoid", "LeakyRelu", "Affine"],
-        alphas=[2.0, 0.5, 0.8],
-        betas=[0.3, 0.1],
-        rnn_type="LSTM",
-    )
+        # Different activation testing.
+        # Default value hardsigmoid.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=False,
+            activations=["HardSigmoid", "Tanh", "Tanh"] * directions,
+            rnn_type="LSTM",
+            directions=directions,
+        )
+        # Multiple parameterized activations.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=False,
+            activations=["HardSigmoid", "LeakyRelu", "Tanh"] * directions,
+            alphas=[2.0, 0.5, 0.0] * directions,
+            betas=[0.3, 0.0, 0.0] * directions,
+            rnn_type="LSTM",
+            directions=directions,
+        )
+        # All parameterized with new Affine activation.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=False,
+            activations=["HardSigmoid", "LeakyRelu", "Affine"] * directions,
+            alphas=[2.0, 0.5, 0.8] * directions,
+            betas=[0.3, 0.1, 0.0] * directions,
+            rnn_type="LSTM",
+            directions=directions,
+        )
 
-    # Testing with initial state and peepholes
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=True,
-        use_initial_state=True,
-        rnn_type="LSTM",
-    )
+        # Testing with initial state and peepholes
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=True,
+            use_initial_state=True,
+            rnn_type="LSTM",
+            directions=directions,
+        )
 
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=True,
-        use_initial_state=True,
-        use_peep=True,
-        rnn_type="LSTM",
-    )
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=True,
+            use_initial_state=True,
+            use_peep=True,
+            rnn_type="LSTM",
+            directions=directions,
+        )
 
 
 @tvm.testing.uses_gpu
 def test_gru():
-    # No bias.
-    verify_rnn(
-        seq_length=2, batch_size=1, input_size=16, hidden_size=32, use_bias=False, rnn_type="GRU"
-    )
-    # large batch.
-    verify_rnn(
-        seq_length=4,
-        batch_size=8,
-        input_size=16,
-        hidden_size=32,
-        use_bias=True,
-        rnn_type="GRU",
-        linear_before_reset=True,
-    )
-    # Non power of two.
-    verify_rnn(
-        seq_length=3, batch_size=3, input_size=16, hidden_size=40, use_bias=True, rnn_type="GRU"
-    )
-    # Long sequence.
-    verify_rnn(
-        seq_length=8, batch_size=1, input_size=16, hidden_size=32, use_bias=True, rnn_type="GRU"
-    )
-    # Large hidden.
-    verify_rnn(
-        seq_length=2, batch_size=1, input_size=16, hidden_size=128, use_bias=True, rnn_type="GRU"
-    )
-    # Large input.
-    verify_rnn(
-        seq_length=2, batch_size=1, input_size=64, hidden_size=32, use_bias=True, rnn_type="GRU"
-    )
+    for directions in [1, 2]:
+        # No bias.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=False,
+            rnn_type="GRU",
+            directions=directions,
+        )
+        # large batch.
+        verify_rnn(
+            seq_length=4,
+            batch_size=8,
+            input_size=16,
+            hidden_size=32,
+            use_bias=True,
+            rnn_type="GRU",
+            linear_before_reset=True,
+            directions=directions,
+        )
+        # Non power of two.
+        verify_rnn(
+            seq_length=3,
+            batch_size=3,
+            input_size=16,
+            hidden_size=40,
+            use_bias=True,
+            rnn_type="GRU",
+            directions=directions,
+        )
+        # Long sequence.
+        verify_rnn(
+            seq_length=8,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=True,
+            rnn_type="GRU",
+            directions=directions,
+        )
+        # Large hidden.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=128,
+            use_bias=True,
+            rnn_type="GRU",
+            directions=directions,
+        )
+        # Large input.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=64,
+            hidden_size=32,
+            use_bias=True,
+            rnn_type="GRU",
+            directions=directions,
+        )
 
-    # Different activation testing.
-    # Default value hardsigmoid.
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=False,
-        activations=["HardSigmoid", "Softsign"],
-        rnn_type="GRU",
-    )
-    # Multiple parameterized activations.
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=False,
-        activations=["HardSigmoid", "LeakyRelu"],
-        alphas=[2.0, 0.5],
-        betas=[0.3],
-        rnn_type="GRU",
-    )
-    # All parameterized with new Affine activation.
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=False,
-        activations=["HardSigmoid", "Affine"],
-        alphas=[2.0, 0.8],
-        betas=[0.3, 0.1],
-        rnn_type="GRU",
-    )
+        # Different activation testing.
+        # Default value hardsigmoid.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=False,
+            activations=["HardSigmoid", "Softsign"] * directions,
+            rnn_type="GRU",
+            directions=directions,
+        )
+        # Multiple parameterized activations.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=False,
+            activations=["HardSigmoid", "LeakyRelu"] * directions,
+            alphas=[2.0, 0.5] * directions,
+            betas=[0.3, 0.0] * directions,
+            rnn_type="GRU",
+            directions=directions,
+        )
+        # All parameterized with new Affine activation.
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=False,
+            activations=["HardSigmoid", "Affine"] * directions,
+            alphas=[2.0, 0.8] * directions,
+            betas=[0.3, 0.1] * directions,
+            rnn_type="GRU",
+            directions=directions,
+        )
 
-    # Testing with initial state
-    verify_rnn(
-        seq_length=2,
-        batch_size=1,
-        input_size=16,
-        hidden_size=32,
-        use_bias=True,
-        use_initial_state=True,
-        rnn_type="GRU",
-    )
+        # Testing with initial state
+        verify_rnn(
+            seq_length=2,
+            batch_size=1,
+            input_size=16,
+            hidden_size=32,
+            use_bias=True,
+            use_initial_state=True,
+            rnn_type="GRU",
+            directions=directions,
+        )
 
 
-# TODO(mbrookhart): enable once VM supports heterogenous execution
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_resize():
-    def verify(ishape, oshape, scales, mode, coord_trans):
+    def verify(ishape, oshape, scales, mode, coord_trans="asymmetric", alpha=0.5, exclude=False):
         nodes = [
             make_constant_node("roi", onnx.TensorProto.FLOAT, (0,), []),
             make_constant_node("scales", onnx.TensorProto.FLOAT, (len(scales),), scales),
@@ -3331,6 +3565,8 @@ def test_resize():
                 outputs=["Y"],
                 mode=mode,
                 coordinate_transformation_mode=coord_trans,
+                cubic_coeff_a=alpha,
+                exclude_outside=exclude,
             )
         )
 
@@ -3347,29 +3583,66 @@ def test_resize():
 
         verify_with_ort(model, [ishape], [oshape], use_vm=True, opset=11, freeze_params=True)
 
-    # upsampling
-    verify([1, 16, 32, 32], [1, 16, 64, 64], [], "nearest", "asymmetric")
-    verify([1, 16, 32, 32], [1, 16, 64, 64], [], "linear", "asymmetric")
-    verify([1, 16, 32, 32], [1, 16, 64, 64], [], "nearest", "align_corners")
-    verify([1, 16, 32, 32], [1, 16, 64, 64], [], "linear", "align_corners")
-    verify([1, 16, 32, 32], [1, 16, 64, 64], [], "nearest", "half_pixel")
-    verify([1, 16, 32, 32], [1, 16, 64, 64], [], "linear", "half_pixel")
+    for ndim in [1, 2, 3]:
+        method = "nearest"
+        for coord_trans in ["asymmetric", "align_corners", "half_pixel"]:
+            # upsampling
+            verify([1, 16] + [32] * ndim, [1, 16] + [64] * ndim, [], method, coord_trans)
+            # downsampling
+            verify([1, 16] + [32] * ndim, [1, 16] + [16] * ndim, [], method, coord_trans)
+            # scales are specified instead of sizes
+            verify([1, 16] + [32] * ndim, [], [1, 1] + [0.5] * ndim, method, coord_trans)
+            verify([1, 16] + [32] * ndim, [], [1, 1] + [2] * ndim, method, coord_trans)
 
-    # downsampling
-    verify([1, 16, 32, 32], [1, 16, 16, 16], [], "nearest", "asymmetric")
-    verify([1, 16, 32, 32], [1, 16, 16, 16], [], "linear", "asymmetric")
-    verify([1, 16, 32, 32], [1, 16, 16, 16], [], "nearest", "align_corners")
-    verify([1, 16, 32, 32], [1, 16, 16, 16], [], "linear", "align_corners")
-    verify([1, 16, 32, 32], [1, 16, 16, 16], [], "nearest", "half_pixel")
-    verify([1, 16, 32, 32], [1, 16, 16, 16], [], "linear", "half_pixel")
+        method = "linear"
+        # upsampling
+        verify([1, 16] + [32] * ndim, [1, 16] + [64] * ndim, [], method)
+        # downsampling
+        verify([1, 16] + [32] * ndim, [1, 16] + [16] * ndim, [], method)
+        # scales are specified instead of sizes
+        verify([1, 16] + [32] * ndim, [], [1, 1] + [0.5] * ndim, method)
+        verify([1, 16] + [32] * ndim, [], [1, 1] + [2] * ndim, method)
 
-    # scales are specified instead of sizes
-    verify([1, 16, 32, 32], [], [1, 1, 2, 2], "nearest", "asymmetric")
-    verify([1, 16, 32, 32], [], [1, 1, 2, 2], "linear", "asymmetric")
-    verify([1, 16, 32, 32], [], [1, 1, 2, 2], "nearest", "align_corners")
-    verify([1, 16, 32, 32], [], [1, 1, 2, 2], "linear", "align_corners")
-    verify([1, 16, 32, 32], [], [1, 1, 0.5, 0.5], "linear", "half_pixel")
-    verify([1, 16, 32, 32], [], [1, 1, 0.5, 0.5], "nearest", "half_pixel")
+        if ndim == 2:
+            # ONNX Runtime only supports cubic interpolation for 2D images
+            method = "cubic"
+            for alpha in [0.5, 0.75]:
+                for exclude in [True, False]:
+                    # upsampling
+                    verify(
+                        [1, 16] + [32] * ndim,
+                        [1, 16] + [64] * ndim,
+                        [],
+                        method,
+                        alpha=alpha,
+                        exclude=exclude,
+                    )
+                    # downsampling
+                    verify(
+                        [1, 16] + [32] * ndim,
+                        [1, 16] + [16] * ndim,
+                        [],
+                        method,
+                        alpha=alpha,
+                        exclude=exclude,
+                    )
+                    # scales are specified instead of sizes
+                    verify(
+                        [1, 16] + [32] * ndim,
+                        [],
+                        [1, 1] + [0.5] * ndim,
+                        method,
+                        alpha=alpha,
+                        exclude=exclude,
+                    )
+                    verify(
+                        [1, 16] + [32] * ndim,
+                        [],
+                        [1, 1] + [2] * ndim,
+                        method,
+                        alpha=alpha,
+                        exclude=exclude,
+                    )
 
     def verify_opset_10(ishape, scales, mode):
         nodes = [
@@ -3418,9 +3691,7 @@ def test_nonzero():
 
         model = helper.make_model(graph, producer_name="nonzero_test")
 
-        verify_with_ort_with_inputs(
-            model, [indata], targets=["llvm"], dtype="int64", use_vm=True, opset=9
-        )
+        verify_with_ort_with_inputs(model, [indata], dtype="int64", use_vm=True, opset=9)
 
     input_data = np.array([[1, 0], [1, 1]], dtype=np.int64)
     result = np.array((np.nonzero(input_data)))  # expected output [[0, 1, 1], [0, 0, 1]]
@@ -3540,7 +3811,7 @@ def test_roi_align():
     # ONNX implementation of roi_align with max mode is incorrect, so we don't compare outputs here.
 
 
-# @tvm.testing.uses_gpu
+@tvm.testing.uses_gpu
 def test_non_max_suppression():
     def verify_nms(
         boxes, scores, max_output_boxes_per_class, iou_threshold, score_threshold, output_dims
@@ -3689,7 +3960,7 @@ def verify_cond_loop():
 
     trip_count = np.array(5).astype(np.int64)
     res_y = np.array([13]).astype(np.float32)
-    cond = np.array(1).astype(np.bool)
+    cond = np.array(1).astype(bool)
     loop_graph = onnx.helper.make_graph(
         [loop_node],
         "loop_outer",
@@ -3707,9 +3978,9 @@ def verify_cond_loop():
 
     # Set a high trip count so that condition trips first.
     trip_count = np.array(40).astype(np.int64)
-    cond = np.array(1).astype(np.bool)
+    cond = np.array(1).astype(bool)
     input_vals = [trip_count, cond, y]
-    verify_with_ort_with_inputs(loop_model, input_vals, use_vm=True, freeze_params=True)
+    verify_with_ort_with_inputs(loop_model, input_vals, use_vm=True, freeze_params=True, opset=11)
 
 
 def verify_count_loop():
@@ -3745,7 +4016,7 @@ def verify_count_loop():
 
     trip_count = np.array(5).astype(np.int64)
     res_y = np.array([13]).astype(np.float32)
-    cond = np.array(1).astype(np.bool)
+    cond = np.array(1).astype(bool)
     loop_graph = onnx.helper.make_graph(
         [loop_node],
         "loop_outer",
@@ -3762,12 +4033,12 @@ def verify_count_loop():
     loop_model = onnx.helper.make_model(loop_graph)
 
     trip_count = np.array(5).astype(np.int64)
-    cond = np.array(1).astype(np.bool)
+    cond = np.array(1).astype(bool)
     input_vals = [trip_count, cond, y]
-    verify_with_ort_with_inputs(loop_model, input_vals, use_vm=True, freeze_params=True)
+    verify_with_ort_with_inputs(loop_model, input_vals, use_vm=True, freeze_params=True, opset=11)
 
 
-def verify_tensor_loop():
+def verify_tensor_loop(shapeless_output=False):
     y_in = helper.make_tensor_value_info("y_in", TensorProto.FLOAT, [3, 3, 3, 3])
     y_out = helper.make_tensor_value_info("y_out", TensorProto.FLOAT, [3, 3, 3, 3])
     scan_out = helper.make_tensor_value_info("scan_out", TensorProto.FLOAT, [3, 3, 3, 3])
@@ -3799,7 +4070,14 @@ def verify_tensor_loop():
     )
 
     trip_count = np.array(5).astype(np.int64)
-    cond = np.array(1).astype(np.bool)
+    cond = np.array(1).astype(bool)
+
+    # Allow testing of malformed nodes since pytorch likes to create these.
+    if shapeless_output:
+        scan_shape = None
+    else:
+        scan_shape = [5, 3, 3, 3, 3]
+
     loop_graph = onnx.helper.make_graph(
         [loop_node],
         "loop_outer",
@@ -3810,16 +4088,16 @@ def verify_tensor_loop():
         ],
         outputs=[
             onnx.helper.make_tensor_value_info("res_y", onnx.TensorProto.FLOAT, [3, 3, 3, 3]),
-            onnx.helper.make_tensor_value_info("res_scan", onnx.TensorProto.FLOAT, [5, 3, 3, 3, 3]),
+            onnx.helper.make_tensor_value_info("res_scan", onnx.TensorProto.FLOAT, scan_shape),
         ],
     )
     loop_model = onnx.helper.make_model(loop_graph)
 
     trip_count = np.array(5).astype(np.int64)
-    cond = np.array(1).astype(np.bool)
+    cond = np.array(1).astype(bool)
     input_vals = [trip_count, cond, y]
     verify_with_ort_with_inputs(
-        loop_model, input_vals, use_vm=True, freeze_params=True, convert_to_static=True
+        loop_model, input_vals, use_vm=True, freeze_params=True, convert_to_static=True, opset=11
     )
 
 
@@ -3830,31 +4108,45 @@ def test_loop():
     verify_count_loop()
     # Test a loop that uses an array output.
     verify_tensor_loop()
+    # Test a loop that is malformed and has no output shape defined.
+    verify_tensor_loop(shapeless_output=True)
 
 
-def verify_if(cond_array):
+def verify_if(cond_array, num_outputs):
     # Given a bool scalar input cond.
     # return constant tensor x if cond is True, otherwise return constant tensor y.
-    then_out = onnx.helper.make_tensor_value_info("then_out", onnx.TensorProto.FLOAT, [5])
-    else_out = onnx.helper.make_tensor_value_info("else_out", onnx.TensorProto.FLOAT, [5])
 
-    x = np.array([1, 2, 3, 4, 5]).astype(np.float32)
-    y = np.array([5, 4, 3, 2, 1]).astype(np.float32)
+    def append_constant_nodes(nodes, outputs, expected, name):
+        outputs.append(onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, [5]))
 
-    then_const_node = onnx.helper.make_node(
-        "Constant", inputs=[], outputs=["then_out"], value=numpy_helper.from_array(x)
-    )
+        expected.append(np.random.randn(5).astype("float32"))
 
-    else_const_node = onnx.helper.make_node(
-        "Constant", inputs=[], outputs=["else_out"], value=numpy_helper.from_array(y)
-    )
+        nodes.append(
+            onnx.helper.make_node(
+                "Constant", inputs=[], outputs=[name], value=numpy_helper.from_array(expected[-1])
+            )
+        )
 
-    then_body = onnx.helper.make_graph([then_const_node], "then_body", [], [then_out])
+    if_outputs = []
+    graph_outputs = []
 
-    else_body = onnx.helper.make_graph([else_const_node], "else_body", [], [else_out])
+    then_nodes, then_outs, then_expected = [], [], []
+    else_nodes, else_outs, else_expected = [], [], []
+
+    for i in range(num_outputs):
+        append_constant_nodes(then_nodes, then_outs, then_expected, "then_out{}".format(i))
+        append_constant_nodes(else_nodes, else_outs, else_expected, "else_out{}".format(i))
+
+        if_outputs.append("res{}".format(i))
+        graph_outputs.append(
+            onnx.helper.make_tensor_value_info("res{}".format(i), onnx.TensorProto.FLOAT, [5]),
+        )
+
+    then_body = onnx.helper.make_graph(then_nodes, "then_body", [], then_outs)
+    else_body = onnx.helper.make_graph(else_nodes, "else_body", [], else_outs)
 
     if_node = onnx.helper.make_node(
-        "If", inputs=["cond"], outputs=["res"], then_branch=then_body, else_branch=else_body
+        "If", inputs=["cond"], outputs=if_outputs, then_branch=then_body, else_branch=else_body
     )
 
     if_graph = onnx.helper.make_graph(
@@ -3863,9 +4155,7 @@ def verify_if(cond_array):
         inputs=[
             onnx.helper.make_tensor_value_info("cond", onnx.TensorProto.BOOL, []),
         ],
-        outputs=[
-            onnx.helper.make_tensor_value_info("res", onnx.TensorProto.FLOAT, [5]),
-        ],
+        outputs=graph_outputs,
     )
 
     if_model = onnx.helper.make_model(if_graph)
@@ -3873,12 +4163,14 @@ def verify_if(cond_array):
         cond = np.array([1]).astype("bool")
     else:
         cond = np.array(1).astype("bool")
-    correct_out = x if cond else y
+    correct_out = then_expected if cond else else_expected
 
     # TODO(jwfromm): Onnxruntime 1.0.0 is buggy with If statements. Replace this with
     # verify_with_ort once we update versions.
-    for target, ctx in tvm.testing.enabled_targets():
-        tvm_out = get_tvm_output_with_vm(if_model, [cond], target, ctx, freeze_params=True)
+    for target, dev in tvm.testing.enabled_targets():
+        tvm_out = get_tvm_output_with_vm(if_model, [cond], target, dev, freeze_params=True)
+        if not isinstance(tvm_out, list):
+            tvm_out = [tvm_out]
         for i in range(len(tvm_out)):
             tvm.testing.assert_allclose(correct_out[i], tvm_out[i], rtol=1e-05, atol=1e-05)
 
@@ -3886,8 +4178,10 @@ def verify_if(cond_array):
 @tvm.testing.uses_gpu
 def test_if():
     # Confirm that if works with cond as an array or scalar.
-    verify_if(cond_array=False)
-    verify_if(cond_array=True)
+    verify_if(cond_array=False, num_outputs=1)
+    verify_if(cond_array=False, num_outputs=2)
+    verify_if(cond_array=True, num_outputs=1)
+    verify_if(cond_array=True, num_outputs=2)
 
 
 @tvm.testing.uses_gpu
@@ -4013,6 +4307,7 @@ def test_softplus():
     verify_softplus(input_data)
 
 
+@tvm.testing.uses_gpu
 def test_cumsum():
     def verify_cumsum(indata, axis, exclusive=0, reverse=0, type="float32"):
         cumsum_node = onnx.helper.make_node(
@@ -4087,6 +4382,925 @@ def test_cumsum():
     verify_cumsum(data, 0, 0, 1, type="int32")
     verify_cumsum(data, 1, 0, 1, type="int32")
     verify_cumsum(data, 1, 1, 1, type="int32")
+
+
+@tvm.testing.uses_gpu
+def test_eyelike():
+    def verify_eyelike(indata):
+        node = helper.make_node(
+            "EyeLike",
+            inputs=["X"],
+            outputs=["Y"],
+        )
+
+        graph = helper.make_graph(
+            [node],
+            "eyelike_test",
+            inputs=[helper.make_tensor_value_info("X", TensorProto.FLOAT, list(indata.shape))],
+            outputs=[helper.make_tensor_value_info("Y", TensorProto.FLOAT, list(indata.shape))],
+        )
+
+        model = helper.make_model(graph, producer_name="eyelike_test")
+
+        verify_with_ort_with_inputs(model, [indata], dtype="float32", opset=9)
+
+    input_data = np.zeros((5, 5), dtype=np.float32)
+    verify_eyelike(input_data)
+
+
+"""
+  The following parameterized tests loads the tests that ONNX ships as
+  serialized ONNX files, inputs, and outputs. The goal of this test
+  is to ensure the ONNX importer is in line with the ONNX specification.
+  To allow these tests to run in CI before all pass, a number of tests that
+  are not yet supported are skipped.
+"""
+
+from onnx import numpy_helper
+
+f = onnx.__file__
+import glob
+
+onnx_test_folders = sorted(glob.glob("/".join(f.split("/")[0:-1]) + "/backend/test/data/node/*/"))
+
+unsupported_onnx_tests = [
+    "test_adagrad/",
+    "test_adagrad_multiple/",
+    "test_adam/",
+    "test_adam_multiple/",
+    "test_argmax_default_axis_example_select_last_index/",
+    "test_argmax_default_axis_random_select_last_index/",
+    "test_argmax_keepdims_example_select_last_index/",
+    "test_argmax_keepdims_random_select_last_index/",
+    "test_argmax_negative_axis_keepdims_example_select_last_index/",
+    "test_argmax_negative_axis_keepdims_random_select_last_index/",
+    "test_argmax_no_keepdims_example_select_last_index/",
+    "test_argmax_no_keepdims_random_select_last_index/",
+    "test_argmin_default_axis_example_select_last_index/",
+    "test_argmin_default_axis_random_select_last_index/",
+    "test_argmin_keepdims_example_select_last_index/",
+    "test_argmin_keepdims_random_select_last_index/",
+    "test_argmin_negative_axis_keepdims_example_select_last_index/",
+    "test_argmin_negative_axis_keepdims_random_select_last_index/",
+    "test_argmin_no_keepdims_example_select_last_index/",
+    "test_argmin_no_keepdims_random_select_last_index/",
+    "test_cast_BFLOAT16_to_FLOAT/",
+    "test_cast_DOUBLE_to_FLOAT16/",
+    "test_cast_FLOAT_to_BFLOAT16/",
+    "test_cast_FLOAT_to_STRING/",
+    "test_cast_STRING_to_FLOAT/",
+    "test_celu/",
+    "test_compress_0/",
+    "test_compress_1/",
+    "test_compress_default_axis/",
+    "test_compress_negative_axis/",
+    "test_convtranspose_dilations/",
+    "test_convtranspose_output_shape/",
+    "test_cumsum_1d/",
+    "test_cumsum_1d_exclusive/",
+    "test_cumsum_1d_reverse/",
+    "test_cumsum_1d_reverse_exclusive/",
+    "test_cumsum_2d_axis_0/",
+    "test_cumsum_2d_axis_1/",
+    "test_cumsum_2d_negative_axis/",
+    "test_det_2d/",
+    "test_det_nd/",
+    "test_dropout_default/",
+    "test_dropout_default_mask/",
+    "test_dropout_default_mask_ratio/",
+    "test_dropout_default_ratio/",
+    "test_einsum_batch_diagonal/",
+    "test_einsum_batch_matmul/",
+    "test_einsum_inner_prod/",
+    "test_einsum_sum/",
+    "test_einsum_transpose/",
+    "test_greater_equal/",
+    "test_greater_equal_bcast/",
+    "test_hardmax_axis_0/",
+    "test_hardmax_axis_1/",
+    "test_hardmax_default_axis/",
+    "test_if_seq/",
+    "test_less_equal/",
+    "test_less_equal_bcast/",
+    "test_logsoftmax_axis_0/",
+    "test_logsoftmax_axis_0_expanded/",
+    "test_logsoftmax_axis_1/",
+    "test_logsoftmax_axis_1_expanded/",
+    "test_logsoftmax_axis_2_expanded/",
+    "test_logsoftmax_default_axis/",
+    "test_logsoftmax_default_axis_expanded/",
+    "test_logsoftmax_example_1_expanded/",
+    "test_logsoftmax_large_number_expanded/",
+    "test_logsoftmax_negative_axis_expanded/",
+    "test_loop11/",
+    "test_loop13_seq/",
+    "test_matmulinteger/",
+    "test_maxpool_2d_same_lower/",
+    "test_maxpool_2d_same_upper/",
+    "test_maxpool_with_argmax_2d_precomputed_pads/",
+    "test_maxpool_with_argmax_2d_precomputed_strides/",
+    "test_maxunpool_export_with_output_shape/",
+    "test_momentum/",
+    "test_momentum_multiple/",
+    "test_mvn/",
+    "test_nesterov_momentum/",
+    "test_nllloss_NC/",
+    "test_nllloss_NC_expanded/",
+    "test_nllloss_NCd1/",
+    "test_nllloss_NCd1_expanded/",
+    "test_nllloss_NCd1_ii/",
+    "test_nllloss_NCd1_ii_expanded/",
+    "test_nllloss_NCd1_mean_weight_negative_ii/",
+    "test_nllloss_NCd1_mean_weight_negative_ii_expanded/",
+    "test_nllloss_NCd1_weight/",
+    "test_nllloss_NCd1_weight_expanded/",
+    "test_nllloss_NCd1_weight_ii/",
+    "test_nllloss_NCd1_weight_ii_expanded/",
+    "test_nllloss_NCd1d2/",
+    "test_nllloss_NCd1d2_expanded/",
+    "test_nllloss_NCd1d2_no_weight_reduction_mean_ii/",
+    "test_nllloss_NCd1d2_no_weight_reduction_mean_ii_expanded/",
+    "test_nllloss_NCd1d2_reduction_mean/",
+    "test_nllloss_NCd1d2_reduction_mean_expanded/",
+    "test_nllloss_NCd1d2_reduction_sum/",
+    "test_nllloss_NCd1d2_reduction_sum_expanded/",
+    "test_nllloss_NCd1d2_with_weight/",
+    "test_nllloss_NCd1d2_with_weight_expanded/",
+    "test_nllloss_NCd1d2_with_weight_reduction_mean/",
+    "test_nllloss_NCd1d2_with_weight_reduction_mean_expanded/",
+    "test_nllloss_NCd1d2_with_weight_reduction_sum/",
+    "test_nllloss_NCd1d2_with_weight_reduction_sum_expanded/",
+    "test_nllloss_NCd1d2_with_weight_reduction_sum_ii/",
+    "test_nllloss_NCd1d2_with_weight_reduction_sum_ii_expanded/",
+    "test_nllloss_NCd1d2d3_none_no_weight_negative_ii/",
+    "test_nllloss_NCd1d2d3_none_no_weight_negative_ii_expanded/",
+    "test_nllloss_NCd1d2d3_sum_weight_high_ii/",
+    "test_nllloss_NCd1d2d3_sum_weight_high_ii_expanded/",
+    "test_nllloss_NCd1d2d3d4d5_mean_weight/",
+    "test_nllloss_NCd1d2d3d4d5_mean_weight_expanded/",
+    "test_nllloss_NCd1d2d3d4d5_none_no_weight/",
+    "test_nllloss_NCd1d2d3d4d5_none_no_weight_expanded/",
+    "test_pow_types_float/",
+    "test_pow_types_float32_int32/",
+    "test_pow_types_float32_int64/",
+    "test_pow_types_float32_uint32/",
+    "test_pow_types_float32_uint64/",
+    "test_pow_types_int/",
+    "test_pow_types_int32_float32/",
+    "test_pow_types_int32_int32/",
+    "test_pow_types_int64_float32/",
+    "test_pow_types_int64_int64/",
+    "test_qlinearmatmul_2D/",
+    "test_qlinearmatmul_3D/",
+    "test_reduce_sum_default_axes_keepdims_example/",
+    "test_reduce_sum_default_axes_keepdims_random/",
+    "test_reduce_sum_do_not_keepdims_example/",
+    "test_reduce_sum_do_not_keepdims_random/",
+    "test_reduce_sum_empty_axes_input_noop_example/",
+    "test_reduce_sum_empty_axes_input_noop_random/",
+    "test_reduce_sum_keepdims_example/",
+    "test_reduce_sum_keepdims_random/",
+    "test_reduce_sum_negative_axes_keepdims_example/",
+    "test_reduce_sum_negative_axes_keepdims_random/",
+    "test_resize_downsample_sizes_cubic/",
+    "test_resize_downsample_sizes_linear_pytorch_half_pixel/",
+    "test_resize_downsample_sizes_nearest/",
+    "test_resize_tf_crop_and_resize/",
+    "test_resize_upsample_sizes_cubic/",
+    "test_resize_upsample_sizes_nearest/",
+    "test_resize_upsample_sizes_nearest_ceil_half_pixel/",
+    "test_resize_upsample_sizes_nearest_floor_align_corners/",
+    "test_resize_upsample_sizes_nearest_round_prefer_ceil_asymmetric/",
+    "test_rnn_seq_length/",
+    "test_round/",
+    "test_scan9_sum/",
+    "test_scan_sum/",
+    "test_sce_NCd1_mean_weight_negative_ii/",
+    "test_sce_NCd1_mean_weight_negative_ii_expanded/",
+    "test_sce_NCd1_mean_weight_negative_ii_log_prob/",
+    "test_sce_NCd1_mean_weight_negative_ii_log_prob_expanded/",
+    "test_sce_NCd1d2d3_none_no_weight_negative_ii/",
+    "test_sce_NCd1d2d3_none_no_weight_negative_ii_expanded/",
+    "test_sce_NCd1d2d3_none_no_weight_negative_ii_log_prob/",
+    "test_sce_NCd1d2d3_none_no_weight_negative_ii_log_prob_expanded/",
+    "test_sce_NCd1d2d3_sum_weight_high_ii/",
+    "test_sce_NCd1d2d3_sum_weight_high_ii_expanded/",
+    "test_sce_NCd1d2d3_sum_weight_high_ii_log_prob/",
+    "test_sce_NCd1d2d3_sum_weight_high_ii_log_prob_expanded/",
+    "test_sce_NCd1d2d3d4d5_mean_weight/",
+    "test_sce_NCd1d2d3d4d5_mean_weight_expanded/",
+    "test_sce_NCd1d2d3d4d5_mean_weight_log_prob/",
+    "test_sce_NCd1d2d3d4d5_mean_weight_log_prob_expanded/",
+    "test_sce_NCd1d2d3d4d5_none_no_weight/",
+    "test_sce_NCd1d2d3d4d5_none_no_weight_expanded/",
+    "test_sce_NCd1d2d3d4d5_none_no_weight_log_prob/",
+    "test_sce_NCd1d2d3d4d5_none_no_weight_log_prob_expanded/",
+    "test_sce_mean/",
+    "test_sce_mean_3d/",
+    "test_sce_mean_3d_expanded/",
+    "test_sce_mean_3d_log_prob/",
+    "test_sce_mean_3d_log_prob_expanded/",
+    "test_sce_mean_expanded/",
+    "test_sce_mean_log_prob/",
+    "test_sce_mean_log_prob_expanded/",
+    "test_sce_mean_no_weight_ii/",
+    "test_sce_mean_no_weight_ii_3d/",
+    "test_sce_mean_no_weight_ii_3d_expanded/",
+    "test_sce_mean_no_weight_ii_3d_log_prob/",
+    "test_sce_mean_no_weight_ii_3d_log_prob_expanded/",
+    "test_sce_mean_no_weight_ii_4d/",
+    "test_sce_mean_no_weight_ii_4d_expanded/",
+    "test_sce_mean_no_weight_ii_4d_log_prob/",
+    "test_sce_mean_no_weight_ii_4d_log_prob_expanded/",
+    "test_sce_mean_no_weight_ii_expanded/",
+    "test_sce_mean_no_weight_ii_log_prob/",
+    "test_sce_mean_no_weight_ii_log_prob_expanded/",
+    "test_sce_mean_weight/",
+    "test_sce_mean_weight_expanded/",
+    "test_sce_mean_weight_ii/",
+    "test_sce_mean_weight_ii_3d/",
+    "test_sce_mean_weight_ii_3d_expanded/",
+    "test_sce_mean_weight_ii_3d_log_prob/",
+    "test_sce_mean_weight_ii_3d_log_prob_expanded/",
+    "test_sce_mean_weight_ii_4d/",
+    "test_sce_mean_weight_ii_4d_expanded/",
+    "test_sce_mean_weight_ii_4d_log_prob/",
+    "test_sce_mean_weight_ii_4d_log_prob_expanded/",
+    "test_sce_mean_weight_ii_expanded/",
+    "test_sce_mean_weight_ii_log_prob/",
+    "test_sce_mean_weight_ii_log_prob_expanded/",
+    "test_sce_mean_weight_log_prob/",
+    "test_sce_mean_weight_log_prob_expanded/",
+    "test_sce_none/",
+    "test_sce_none_expanded/",
+    "test_sce_none_log_prob/",
+    "test_sce_none_log_prob_expanded/",
+    "test_sce_none_weights/",
+    "test_sce_none_weights_expanded/",
+    "test_sce_none_weights_log_prob/",
+    "test_sce_none_weights_log_prob_expanded/",
+    "test_sce_sum/",
+    "test_sce_sum_expanded/",
+    "test_sce_sum_log_prob/",
+    "test_sce_sum_log_prob_expanded/",
+    "test_sequence_insert_at_back/",
+    "test_sequence_insert_at_front/",
+    "test_simple_rnn_defaults/",
+    "test_simple_rnn_with_initial_bias/",
+    "test_softmax_axis_0/",
+    "test_softmax_axis_0_expanded/",
+    "test_softmax_axis_1/",
+    "test_softmax_axis_1_expanded/",
+    "test_softmax_axis_2_expanded/",
+    "test_softmax_default_axis/",
+    "test_softmax_default_axis_expanded/",
+    "test_softmax_example_expanded/",
+    "test_softmax_large_number_expanded/",
+    "test_softmax_negative_axis_expanded/",
+    "test_split_variable_parts_1d/",
+    "test_split_variable_parts_2d/",
+    "test_split_variable_parts_default_axis/",
+    "test_split_zero_size_splits/",
+    "test_squeeze/",
+    "test_squeeze_negative_axes/",
+    "test_strnormalizer_export_monday_casesensintive_lower/",
+    "test_strnormalizer_export_monday_casesensintive_nochangecase/",
+    "test_strnormalizer_export_monday_casesensintive_upper/",
+    "test_strnormalizer_export_monday_empty_output/",
+    "test_strnormalizer_export_monday_insensintive_upper_twodim/",
+    "test_strnormalizer_nostopwords_nochangecase/",
+    "test_tfidfvectorizer_tf_batch_onlybigrams_skip0/",
+    "test_tfidfvectorizer_tf_batch_onlybigrams_skip5/",
+    "test_tfidfvectorizer_tf_batch_uniandbigrams_skip5/",
+    "test_tfidfvectorizer_tf_only_bigrams_skip0/",
+    "test_tfidfvectorizer_tf_onlybigrams_levelempty/",
+    "test_tfidfvectorizer_tf_onlybigrams_skip5/",
+    "test_tfidfvectorizer_tf_uniandbigrams_skip5/",
+    "test_training_dropout/",
+    "test_training_dropout_default/",
+    "test_training_dropout_default_mask/",
+    "test_training_dropout_mask/",
+    "test_training_dropout_zero_ratio/",
+    "test_training_dropout_zero_ratio_mask/",
+    "test_unique_sorted_with_axis/",
+    "test_unique_sorted_with_axis_3d/",
+    "test_unique_sorted_with_negative_axis/",
+    "test_unsqueeze_axis_0/",
+    "test_unsqueeze_axis_1/",
+    "test_unsqueeze_axis_2/",
+    "test_unsqueeze_negative_axes/",
+    "test_unsqueeze_three_axes/",
+    "test_unsqueeze_two_axes/",
+    "test_unsqueeze_unsorted_axes/",
+    "test_upsample_nearest/",
+]
+
+
+targets = [tgt for (tgt, _) in tvm.testing.enabled_targets()]
+
+target_skips = {
+    "cuda": [
+        "test_mod_mixed_sign_float16/",
+        "test_qlinearconv/",
+        "test_resize_upsample_sizes_nearest/",
+    ]
+}
+
+
+@pytest.mark.parametrize("target", targets)
+@pytest.mark.parametrize("test", onnx_test_folders)
+def test_onnx_nodes(test, target):
+    if target in target_skips:
+        for failure in target_skips[target]:
+            if failure in test:
+                pytest.skip()
+                break
+    for failure in unsupported_onnx_tests:
+        if failure in test:
+            pytest.skip()
+            break
+    atol = 1e-5
+    rtol = 1e-5
+    if "roialign" in test:
+        # for some reason the ONNX test crops the
+        # roialign results to 4 decimal places
+        atol = 1e-4
+    onnx_model = onnx.load(test + "/model.onnx")
+    inputs = []
+    outputs = []
+    for dataset in glob.glob(test + "/*/"):
+        tensors = sorted(glob.glob(dataset + "/*.pb"))
+        for tensor in tensors:
+            new_tensor = onnx.TensorProto()
+            with open(tensor, "rb") as f:
+                new_tensor.ParseFromString(f.read())
+            if "input" in tensor.split("/")[-1]:
+                inputs.append(numpy_helper.to_array(new_tensor))
+            elif "output" in tensor.split("/")[-1]:
+                outputs.append(numpy_helper.to_array(new_tensor))
+            else:
+                raise ImportError(str(tensor) + " not labeled as an import or an output")
+
+    dev = tvm.device(target, 0)
+    tvm_val = get_tvm_output_with_vm(onnx_model, inputs, target, dev)
+    if len(outputs) == 1:
+        tvm.testing.assert_allclose(outputs[0], tvm_val, rtol=rtol, atol=atol)
+    else:
+        for output, val in zip(outputs, tvm_val):
+            tvm.testing.assert_allclose(output, val, rtol=rtol, atol=atol)
+
+
+def test_wrong_input():
+    node = helper.make_node(
+        "Softplus",
+        inputs=["X"],
+        outputs=["Y"],
+    )
+
+    graph = helper.make_graph(
+        [node],
+        "softplus_test",
+        inputs=[helper.make_tensor_value_info("X", TensorProto.FLOAT, list([5]))],
+        outputs=[helper.make_tensor_value_info("Y", TensorProto.FLOAT, list([5]))],
+    )
+    model = helper.make_model(graph, producer_name="softplus_test")
+
+    # Check that the graph can import correctly with proper shape definitions.
+    correct_shape_dict = {"X": [5]}
+    relay.frontend.from_onnx(model, shape=correct_shape_dict)
+
+    # Check that an assertion is triggered when an input not in the graph is provided.
+    wrong_shape_dict = {"Z": [5]}
+    with pytest.raises(AssertionError):
+        relay.frontend.from_onnx(model, shape=wrong_shape_dict)
+
+
+def test_aten():
+    torch.set_grad_enabled(False)
+
+    def _convert_to_onnx(model, inputs):
+        file_name = "{}.onnx".format("aten_model")
+        torch.onnx.export(
+            model,
+            inputs,
+            file_name,
+            export_params=True,
+            verbose=False,
+            opset_version=10,
+            operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN,
+        )
+        onnx_model = onnx.load(file_name)
+        assert 's: "embedding_bag"' in str(onnx_model)
+        return onnx_model
+
+    def verify_embedding_bag(num_embedding, embedding_dim, data_shape, num_bags=None):
+        dummy_data = torch.randint(0, num_embedding - 1, data_shape)
+        tvm_inputs = [dummy_data.numpy()]
+        model = torch.nn.EmbeddingBag(num_embedding, embedding_dim)
+        onnx_model = _convert_to_onnx(model, dummy_data)
+        torch_out = model(dummy_data)
+        for target, ctx in tvm.testing.enabled_targets():
+            tvm_out = get_tvm_output_with_vm(
+                onnx_model, tvm_inputs, target, ctx, freeze_params=True, convert_to_static=True
+            )
+            tvm.testing.assert_allclose(torch_out.numpy(), tvm_out)
+
+    verify_embedding_bag(10, 3, [2, 10])
+    verify_embedding_bag(32, 2, [3, 3])
+
+
+def verify_reverse_sequence(x, sequence_lens, batch_axis, time_axis):
+    node = onnx.helper.make_node(
+        "ReverseSequence",
+        inputs=["x", "sequence_lens"],
+        outputs=["y"],
+        time_axis=time_axis,
+        batch_axis=batch_axis,
+    )
+
+    graph = helper.make_graph(
+        [node],
+        "reverse_sequence_test",
+        inputs=[
+            helper.make_tensor_value_info("x", TensorProto.FLOAT, list(x.shape)),
+            helper.make_tensor_value_info(
+                "sequence_lens", TensorProto.INT64, list(sequence_lens.shape)
+            ),
+        ],
+        outputs=[helper.make_tensor_value_info("y", TensorProto.FLOAT, list(x.shape))],
+    )
+
+    model = helper.make_model(graph, producer_name="reverse_sequence_test")
+    verify_with_ort_with_inputs(model, [x, sequence_lens], [x.shape])
+
+
+@tvm.testing.uses_gpu
+def test_reverse_sequence():
+    x = np.array(
+        [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]],
+        dtype=np.float32,
+    )
+    sequence_lens = np.array([1, 2, 3, 4], dtype=np.int64)
+    verify_reverse_sequence(x, sequence_lens, 0, 1)
+
+    sequence_lens = np.array([4, 3, 2, 1], dtype=np.int64)
+    verify_reverse_sequence(x, sequence_lens, 1, 0)
+
+
+def verify_qlinearconv(
+    x_shape,
+    w_shape,
+    y_shape,
+    padding,
+    kernel_shape,
+    strides,
+    dilations,
+    auto_pad="NOTSET",
+    bias=False,
+):
+
+    x_array = np.random.randint(low=0, high=255, size=x_shape).astype("uint8")
+    w_array = np.random.uniform(low=0, high=255, size=w_shape).astype("uint8")
+
+    initializer = [
+        helper.make_tensor("x_scale", TensorProto.FLOAT, (), [np.random.rand()]),
+        helper.make_tensor("x_zero_point", TensorProto.UINT8, (), [np.random.randint(0, 255)]),
+        helper.make_tensor("w_scale", TensorProto.FLOAT, (), [np.random.rand()]),
+        helper.make_tensor("w_zero_point", TensorProto.UINT8, (), [np.random.randint(0, 255)]),
+        helper.make_tensor("y_scale", TensorProto.FLOAT, (), [np.random.rand()]),
+        helper.make_tensor("y_zero_point", TensorProto.UINT8, (), [np.random.randint(0, 255)]),
+    ]
+
+    input_nodes = [
+        helper.make_tensor_value_info("x", TensorProto.UINT8, list(x_shape)),
+        helper.make_tensor_value_info("w", TensorProto.UINT8, list(w_shape)),
+    ]
+    input_names = [
+        "x",
+        "x_scale",
+        "x_zero_point",
+        "w",
+        "w_scale",
+        "w_zero_point",
+        "y_scale",
+        "y_zero_point",
+    ]
+    input_values = [x_array, w_array]
+
+    if bias is True:
+        b_shape = w_shape[0:1]
+        b_array = np.random.randint(low=0, high=65536, size=b_shape).astype("int32")
+        input_nodes.append(helper.make_tensor_value_info("B", TensorProto.INT32, list(b_shape)))
+        input_names.append("B")
+        input_values.append(b_array)
+
+    if padding is None:
+        ## autopadding with unset default attributes
+        kwargs = {}
+        if not all([s == 1 for s in strides]):
+            kwargs["strides"] = strides
+        if not all([d == 1 for d in dilations]):
+            kwargs["dilations"] = dilations
+
+        node = helper.make_node(
+            "QLinearConv",
+            inputs=input_names,
+            outputs=["y"],
+            # Default values for other attributes:
+            auto_pad=auto_pad,
+            **kwargs,
+        )
+    else:
+        node = helper.make_node(
+            "QLinearConv",
+            inputs=input_names,
+            outputs=["y"],
+            kernel_shape=kernel_shape,
+            # Default values for other attributes:
+            strides=strides,
+            dilations=dilations,
+            # groups=1
+            pads=padding,
+        )
+
+    graph = helper.make_graph(
+        [node],
+        "conv_test",
+        inputs=input_nodes,
+        outputs=[helper.make_tensor_value_info("y", TensorProto.UINT8, list(y_shape))],
+        initializer=initializer,
+    )
+    model = helper.make_model(graph, producer_name="qlinearconv_test")
+    # opt_level=1 will cause error
+    verify_with_ort_with_inputs(model, input_values, opt_level=2)
+
+
+def test_qlinearconv():
+    def repeat(N, D):
+        return tuple([N for _ in range(D)])
+
+    # only support QLinearConv2d because only support qnn.conv2d
+    D = 2
+
+    # Convolution with padding
+    verify_qlinearconv(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(5, D),
+        2 * repeat(1, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+    )
+
+    # Convolution with bias
+    verify_qlinearconv(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(5, D),
+        2 * repeat(1, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+        bias=True,
+    )
+
+    # Convolution with asymmetric padding
+    verify_qlinearconv(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(4, D),
+        repeat(0, D) + repeat(1, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+    )
+    # Convolution without padding
+    verify_qlinearconv(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(3, D),
+        2 * repeat(0, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+    )
+    # Convolution with autopadding
+    verify_qlinearconv(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(5, D),
+        None,
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+        auto_pad="SAME_UPPER",
+    )
+    # Convolution with valid autopadding
+    verify_qlinearconv(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(3, D),
+        None,
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+        auto_pad="VALID",
+    )
+    # Convolution with non uniform stride
+    verify_qlinearconv(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(3, D),
+        None,
+        repeat(3, D),
+        repeat(2, D),
+        repeat(1, D),
+        auto_pad="SAME_UPPER",
+    )
+    # Convolution with dilation
+    verify_qlinearconv(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(5, D),
+        2 * repeat(2, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(2, D),
+    )
+
+
+def verify_qlinearadd(a_shape, b_shape, c_shape):
+
+    a_array = np.random.random(a_shape).astype("float32")
+    b_array = np.random.random(b_shape).astype("float32")
+
+    input_nodes = [
+        helper.make_tensor_value_info("a", TensorProto.FLOAT, list(a_shape)),
+        helper.make_tensor_value_info("b", TensorProto.FLOAT, list(b_shape)),
+    ]
+    input_names = [
+        "a",
+        "b",
+    ]
+    input_values = [a_array, b_array]
+
+    node = helper.make_node("QLinearAdd", inputs=input_names, outputs=["C"])
+
+    node = helper.make_node("Add", ["a", "b"], ["C"])
+    graph = helper.make_graph(
+        [node],
+        "qlinearadd_test",
+        inputs=input_nodes,
+        outputs=[helper.make_tensor_value_info("C", TensorProto.FLOAT, list(c_shape))],
+    )
+    model = helper.make_model(graph, producer_name="qlinearconv_test")
+    from onnxruntime.quantization import quantize_static, CalibrationDataReader, QuantType
+
+    class RandomDataReader(CalibrationDataReader):
+        def __init__(self, n=10):
+            self.data = iter(
+                [
+                    {
+                        "a": np.random.random(a_shape).astype("float32"),
+                        "b": np.random.random(b_shape).astype("float32"),
+                    }
+                    for _ in range(n)
+                ]
+            )
+
+        def get_next(self):
+            return next(self.data, None)
+
+    d = tvm.contrib.utils.tempdir()
+    model_fp32 = os.path.join(d.temp_dir, "model.onnx")
+    onnx.save_model(model, model_fp32)
+    model_quant = os.path.join(d.temp_dir, "model.quant.onnx")
+    quantized_model = quantize_static(model_fp32, model_quant, RandomDataReader())
+    # opt_level=1 will cause error with qnn lowering
+    model = onnx.load(model_quant)
+    verify_with_ort_with_inputs(model, input_values, opt_level=2)
+
+
+def test_qlinearadd():
+    verify_qlinearadd([4, 2], [4, 2], [4, 2])
+    verify_qlinearadd([4, 2], [2], [4, 2])
+    verify_qlinearadd([5, 1, 7], [2, 7], [5, 2, 7])
+
+
+def get_random_uniform(shape, dtype="float32", high=1.0, low=0.0, seed=None, target="llvm"):
+    ONNX_DTYPE = mapping.NP_TYPE_TO_TENSOR_TYPE[np.dtype(dtype)]
+    node = helper.make_node(
+        "RandomUniform", [], ["out"], shape=shape, dtype=ONNX_DTYPE, high=high, low=low
+    )
+    if seed is not None:
+        seed_attr = helper.make_attribute("seed", seed)
+        node.attribute.append(seed_attr)
+
+    graph = helper.make_graph(
+        [node],
+        "random_uniform_test",
+        inputs=[],
+        outputs=[helper.make_tensor_value_info("out", ONNX_DTYPE, shape)],
+    )
+    model = helper.make_model(graph, producer_name="random_uniform_test")
+    return get_tvm_output_with_vm(model, [], target=target, device=tvm.device(target, 0))
+
+
+def test_random_uniform():
+    targets = [tgt for (tgt, _) in tvm.testing.enabled_targets()]
+    for target in targets:
+        # Check that function runs and produces proper shape.
+        vals = get_random_uniform([10], dtype="float32", target=target)
+        assert list(vals.shape) == [10]
+        assert vals.dtype == "float32"
+
+        # Test N-D tensor generation.
+        vals = get_random_uniform([1, 3, 100, 100], dtype="float32", target=target)
+        assert list(vals.shape) == [1, 3, 100, 100]
+
+        # Check that bounds aren't exceeded.
+        vals = get_random_uniform(shape=[100], high=100, low=-100)
+        assert list(vals.shape) == [100]
+        assert all(vals >= -100) and all(vals <= 100)
+
+        # Check that a fixed seed produces the same values when run twice.
+        vals_1 = get_random_uniform(shape=[10], seed=1)
+        vals_2 = get_random_uniform(shape=[10], seed=1)
+        assert all(vals_1 == vals_2)
+
+        # Test against an expected output with a fixed seed.
+        real = get_random_uniform(shape=[10], seed=5)
+        expected = np.asarray(
+            [
+                0.8614111,
+                0.46572232,
+                0.6007328,
+                0.21619737,
+                0.6361222,
+                0.7298056,
+                0.13094282,
+                0.03556716,
+                0.32997167,
+                0.2977605,
+            ]
+        )
+        tvm.testing.assert_allclose(real, expected, rtol=1e-5)
+
+
+def verify_convinteger(
+    x_shape,
+    w_shape,
+    y_shape,
+    padding,
+    kernel_shape,
+    strides,
+    dilations,
+    auto_pad="NOTSET",
+    dtype="uint8",
+):
+
+    x_array = np.random.randint(low=0, high=255, size=x_shape).astype(dtype)
+    w_array = np.random.uniform(low=0, high=255, size=w_shape).astype(dtype)
+    x_zero_point_array = np.random.randint(0, 255, size=[]).astype(dtype)
+    w_zero_point_array = np.random.randint(0, 255, size=[]).astype(dtype)
+
+    ONNX_DTYPE = mapping.NP_TYPE_TO_TENSOR_TYPE[np.dtype(dtype)]
+    input_nodes = [
+        helper.make_tensor_value_info("x", ONNX_DTYPE, list(x_shape)),
+        helper.make_tensor_value_info("w", ONNX_DTYPE, list(w_shape)),
+        helper.make_tensor_value_info("x_zero_point", ONNX_DTYPE, []),
+        helper.make_tensor_value_info("w_zero_point", ONNX_DTYPE, []),
+    ]
+    input_names = [
+        "x",
+        "w",
+        "x_zero_point",
+        "w_zero_point",
+    ]
+    input_values = [x_array, w_array, x_zero_point_array, w_zero_point_array]
+
+    if padding is None:
+        ## autopadding with unset default attributes
+        kwargs = {}
+        if not all([s == 1 for s in strides]):
+            kwargs["strides"] = strides
+        if not all([d == 1 for d in dilations]):
+            kwargs["dilations"] = dilations
+
+        node = helper.make_node(
+            "ConvInteger",
+            inputs=input_names,
+            outputs=["y"],
+            # Default values for other attributes:
+            auto_pad=auto_pad,
+            **kwargs,
+        )
+    else:
+        node = helper.make_node(
+            "ConvInteger",
+            inputs=input_names,
+            outputs=["y"],
+            kernel_shape=kernel_shape,
+            # Default values for other attributes:
+            strides=strides,
+            dilations=dilations,
+            # groups=1
+            pads=padding,
+        )
+
+    graph = helper.make_graph(
+        [node],
+        "convinteger_test",
+        inputs=input_nodes,
+        outputs=[helper.make_tensor_value_info("y", TensorProto.INT32, list(y_shape))],
+    )
+    model = helper.make_model(graph, producer_name="convinteger_test")
+    # opt_level=1 will cause error
+    verify_with_ort_with_inputs(model, input_values, opt_level=2)
+
+
+def test_convinteger():
+    def repeat(N, D):
+        return tuple([N for _ in range(D)])
+
+    # only support 2D ConvInteger because we only support qnn.conv2d for now.
+    D = 2
+
+    # Convolution with padding
+    verify_convinteger(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(5, D),
+        2 * repeat(1, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+    )
+
+    # Convolution with asymmetric padding
+    verify_convinteger(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(4, D),
+        repeat(0, D) + repeat(1, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+    )
+    # Convolution without padding
+    verify_convinteger(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(3, D),
+        2 * repeat(0, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+    )
+    # Convolution with autopadding
+    verify_convinteger(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(5, D),
+        None,
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+        auto_pad="SAME_UPPER",
+    )
+    # Convolution with valid autopadding
+    verify_convinteger(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(3, D),
+        None,
+        repeat(3, D),
+        repeat(1, D),
+        repeat(1, D),
+        auto_pad="VALID",
+    )
+    # Convolution with non uniform stride
+    verify_convinteger(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(3, D),
+        None,
+        repeat(3, D),
+        repeat(2, D),
+        repeat(1, D),
+        auto_pad="SAME_UPPER",
+    )
+    # Convolution with dilation
+    verify_convinteger(
+        (1, 1) + repeat(5, D),
+        (1, 1) + repeat(3, D),
+        (1, 1) + repeat(5, D),
+        2 * repeat(2, D),
+        repeat(3, D),
+        repeat(1, D),
+        repeat(2, D),
+    )
 
 
 if __name__ == "__main__":
@@ -4167,3 +5381,11 @@ if __name__ == "__main__":
     test_maxunpool()
     test_softplus()
     test_cumsum()
+    test_wrong_input()
+    test_aten()
+    test_reverse_sequence()
+    test_eyelike()
+    test_qlinearconv()
+    test_random_uniform()
+    test_convinteger()
+    test_batch_matmul()

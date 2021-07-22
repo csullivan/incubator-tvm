@@ -263,7 +263,7 @@ def get_relay_op(op_name):
         The Relay operator name.
     """
     if "." in op_name:
-        # explicit hierachical modules
+        # explicit hierarchical modules
         op = _op
         try:
             for opn in op_name.split("."):
@@ -493,7 +493,7 @@ def infer_type(node, mod=None):
 
 def fold_constant(node, mod=None):
     if mod is None:
-        mod = IRModule.from_expr(node)
+        mod = IRModule()
     return _transform.FoldConstantExpr(node, mod)
 
 
@@ -527,16 +527,17 @@ def infer_value(input_val, params, mod=None):
     assert all(
         var.name_hint in params.keys() for var in analysis.free_vars(input_val)
     ), "All inputs to infer must be available in params."
+    assert tvm.runtime.enabled("llvm"), "LLVM must be enabled to infer value."
     try:
         # TODO(kevinthesun): Use VM for all cases.
         # pylint: disable=import-outside-toplevel
-        from tvm.contrib import graph_runtime
+        from tvm.contrib import graph_executor
 
         func = _function.Function(analysis.free_vars(input_val), input_val)
         with tvm.transform.PassContext(opt_level=0):
             lib = tvm.relay.build(func, target="llvm", params=params)
-        ctx = tvm.cpu(0)
-        m = graph_runtime.GraphModule(lib["default"](ctx))
+        dev = tvm.cpu(0)
+        m = graph_executor.GraphModule(lib["default"](dev))
         m.run()
         return m.get_output(0)
     except Exception:
@@ -544,7 +545,7 @@ def infer_value(input_val, params, mod=None):
             mod["main"] = _function.Function(analysis.free_vars(input_val), input_val)
         else:
             mod = IRModule.from_expr(input_val)
-        exc = tvm.relay.create_executor("debug", mod=mod, ctx=tvm.cpu(), target="llvm")
+        exc = tvm.relay.create_executor("debug", mod=mod, device=tvm.cpu(), target="llvm")
         inputs = []
         for param in mod["main"].params:
             inputs.append(params[param.name_hint])
@@ -553,7 +554,7 @@ def infer_value(input_val, params, mod=None):
 
 
 def infer_value_simulated(input_val, params):
-    """Extention to infer_value that can be used when some input
+    """Extension to infer_value that can be used when some input
     values are missing. This function creates dummy inputs with the same
     shape and random values then calls infer_value. This is helpful when
     implementing certain onnx operators where we need to evaluate the graph
@@ -582,7 +583,7 @@ def try_infer_value(val, on_success=None, on_failure=None):
     indicates whether infer_value has succeeded or not.
     """
     try:
-        ret = infer_value(val, {}).asnumpy()
+        ret = infer_value(val, {}).numpy()
         if on_success:
             return on_success(ret), True
         return ret, True

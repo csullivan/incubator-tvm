@@ -166,7 +166,7 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
              bool assign_rhs = true) {
     try {
       return solver_.Unify(t1, t2, span, assign_lhs, assign_rhs);
-    } catch (const dmlc::Error& e) {
+    } catch (const Error& e) {
       this->EmitFatal(Diagnostic::Error(span)
                       << "Error unifying `" << t1 << "` and `" << t2 << "`: " << e.what());
       return Type();
@@ -205,8 +205,13 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
       this->EmitFatal(Diagnostic::Error(op->span) << "Cannot do type inference on global variables "
                                                   << "without a module");
     }
-    relay::Function e = Downcast<Function>(mod_->Lookup(var));
-    return e->checked_type();
+
+    if (mod_->ContainGlobalVar(var->name_hint)) {
+      relay::Function e = Downcast<Function>(mod_->Lookup(var));
+      return e->checked_type();
+    } else {
+      return op->checked_type_;
+    }
   }
 
   Type VisitExpr_(const ConstantNode* op) final { return op->tensor_type(); }

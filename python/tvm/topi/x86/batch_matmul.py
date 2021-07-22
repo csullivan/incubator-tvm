@@ -25,7 +25,7 @@ from ..utils import traverse_inline, get_const_tuple, get_max_power2_factor
 
 
 @autotvm.register_topi_compute("batch_matmul.x86")
-def batch_matmul(cfg, x, y, out_shape=None):
+def batch_matmul(cfg, x, y, out_shape=None, out_dtype=None):
     """Computes batch matrix multiplication of `x` and `y` when `x` and `y` are
     data in batch. Supports broadcasting in batch dimension.
 
@@ -60,11 +60,24 @@ def batch_matmul(cfg, x, y, out_shape=None):
         _default_batch_matmul_config(cfg, M, N, K)
 
     k = te.reduce_axis((0, K), name="k")
-    C = te.compute(
-        (B, M, N),
-        lambda b, i, j: te.sum(x[b if XB != 1 else 0, i, k] * y[b if YB != 1 else 0, j, k], axis=k),
-        tag="batch_matmul",
-    )
+    if out_dtype is None or out_dtype == x.dtype:
+        C = te.compute(
+            (B, M, N),
+            lambda b, i, j: te.sum(
+                x[b if XB != 1 else 0, i, k] * y[b if YB != 1 else 0, j, k], axis=k
+            ),
+            tag="batch_matmul",
+        )
+    else:
+        C = te.compute(
+            (B, M, N),
+            lambda b, i, j: te.sum(
+                x[b if XB != 1 else 0, i, k].astype(out_dtype)
+                * y[b if YB != 1 else 0, j, k].astype(out_dtype),
+                axis=k,
+            ),
+            tag="batch_matmul",
+        )
     return C
 
 
@@ -139,7 +152,7 @@ def _default_batch_matmul_config(cfg, M, N, K):
 
 def batch_matmul_blas_common(cfg, x, y, out_shape, lib):
     """Computes batch matrix multiplication of `x` and `y` when `x` and `y` are
-    data in batch, using one of BLAS libraries.
+    data in batch, using one of BLAS libraries. Supports broadcasting in batch dimension.
 
     Parameters
     ----------
@@ -162,10 +175,10 @@ def batch_matmul_blas_common(cfg, x, y, out_shape, lib):
     assert len(x.shape) == 3 and len(y.shape) == 3, "only support 3-dim batch_matmul"
     XB, M, XK = get_const_tuple(x.shape)
     YB, N, YK = get_const_tuple(y.shape)
-    assert XB == YB, "batch dimension doesn't match"
+    assert (XB == YB) or (YB == 1) or (XB == 1), "batch dimension doesn't match"
     assert XK == YK, "shapes of x and y is inconsistent"
     if out_shape is not None:
-        assert out_shape[0] == XB, "got invalid output shape"
+        assert out_shape[0] in (XB, YB), "got invalid output shape"
         assert out_shape[1] == M, "got invalid output shape"
         assert out_shape[2] == N, "got invalid output shape"
     cfg.add_flop(XB * M * N * XK * 2)

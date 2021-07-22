@@ -61,6 +61,16 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 
 // AttrStmt
 AttrStmt::AttrStmt(ObjectRef node, String attr_key, PrimExpr value, Stmt body, Span span) {
+  if (attr_key == attr::storage_scope) {
+    const VarNode* buf = node.as<VarNode>();
+    ICHECK(buf);
+    const auto* ptr_type = buf->type_annotation.as<PointerTypeNode>();
+    ICHECK(ptr_type) << "The provided variable is not of pointer type";
+    auto attr_scope = value.as<StringImmNode>()->value;
+    ICHECK_EQ(attr_scope, ptr_type->storage_scope)
+        << "Storage scopes attached to AttrStmt and buffer var are different. " << attr_scope
+        << ", " << ptr_type->storage_scope;
+  }
   auto n = make_object<AttrStmtNode>();
   n->node = node;
   n->attr_key = std::move(attr_key);
@@ -221,7 +231,7 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
     .set_dispatch<WhileNode>([](const ObjectRef& node, ReprPrinter* p) {
       auto* op = static_cast<const WhileNode*>(node.get());
       p->PrintIndent();
-      p->stream << "while(" << op->condition << "){\n";
+      p->stream << "while(" << op->condition << ") {\n";
       p->indent += 2;
       p->Print(op->body);
       p->indent -= 2;
@@ -377,7 +387,7 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 
 // ProducerRealize
 ProducerRealize::ProducerRealize(DataProducer producer, Region bounds, PrimExpr condition,
-                                 Stmt body, Span span) {
+                                 Stmt body, String storage_scope, Span span) {
   for (size_t i = 0; i < bounds.size(); ++i) {
     ICHECK(bounds[i]->min.defined());
     ICHECK(bounds[i]->extent.defined());
@@ -394,13 +404,14 @@ ProducerRealize::ProducerRealize(DataProducer producer, Region bounds, PrimExpr 
   node->condition = std::move(condition);
   node->body = std::move(body);
   node->span = std::move(span);
+  node->storage_scope = std::move(storage_scope);
   data_ = std::move(node);
 }
 
 TVM_REGISTER_GLOBAL("tir.ProducerRealize")
     .set_body_typed([](DataProducer producer, Region bounds, PrimExpr condition, Stmt body,
-                       Span span) {
-      return ProducerRealize(producer, bounds, condition, body, span);
+                       String storage_scope, Span span) {
+      return ProducerRealize(producer, bounds, condition, body, storage_scope, span);
     });
 
 TVM_REGISTER_NODE_TYPE(ProducerRealizeNode);
@@ -646,6 +657,14 @@ BufferRegion BufferRegion::FullRegion(Buffer buffer) {
   return BufferRegion(buffer, region);
 }
 
+BufferRegion BufferRegion::FromPoint(Buffer buffer, Array<PrimExpr> indices) {
+  Array<Range> region;
+  for (const PrimExpr& index : indices) {
+    region.push_back(Range::FromMinExtent(index, 1));
+  }
+  return BufferRegion(buffer, region);
+}
+
 TVM_REGISTER_GLOBAL("tir.BufferRegion").set_body_typed([](Buffer buffer, Array<Range> region) {
   return BufferRegion(buffer, region);
 });
@@ -781,7 +800,7 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
       auto* op = static_cast<const BlockNode*>(node.get());
       p->PrintIndent();
       PrintBlockTitle(op, p);
-      p->stream << "{\n";
+      p->stream << " {\n";
       p->indent += 2;
 
       // Print block elements (e.g. reads/writes, etc)
@@ -820,7 +839,7 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
       auto* block_op = op->block.get();
       p->PrintIndent();
       PrintBlockTitle(block_op, p);
-      p->stream << "{\n";
+      p->stream << " {\n";
       p->indent += 2;
 
       // Print binding iter_values

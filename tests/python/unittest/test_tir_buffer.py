@@ -131,6 +131,23 @@ def test_buffer_index_merge_mult_mod():
     )
     assert_simplified_equal(index_simplified, index_direct)
 
+    # Test Case5
+    B = tvm.tir.decl_buffer((1, 14, 14, 1024))
+    i = te.size_var("i")
+    j = te.size_var("j")
+    k = te.size_var("k")
+
+    index_simplified = B.vload(
+        (
+            idxd(idxd(idxd((i * 50176 + j * 28672 + k), 1024), 14), 14),
+            idxm(idxd(idxd((i * 50176 + j * 28672 + k), 1024), 14), 14),
+            idxm(idxd((i * 50176 + j * 28672 + k), 1024), 14),
+            idxm((i * 50176 + j * 28672 + k), 1024),
+        )
+    )
+    index_direct = B.vload((0, 0, 0, (i * 50176 + j * 28672 + k)))
+    assert_simplified_equal(index_simplified, index_direct)
+
 
 @tvm.testing.requires_llvm
 def test_buffer_broadcast():
@@ -149,12 +166,12 @@ def test_buffer_broadcast():
 
     def check():
         fadd = tvm.build(s, [A, B, C], target="llvm", name="bcast_add", binds={A: Ab, B: Bb})
-        ctx = tvm.cpu(0)
-        a = tvm.nd.array(np.random.uniform(size=(2, 4, 3)).astype(A.dtype), ctx)
-        b = tvm.nd.array(np.random.uniform(size=(2, 1, 1)).astype(B.dtype), ctx)
-        c = tvm.nd.array(np.zeros((2, 4, 3), dtype=C.dtype), ctx)
+        dev = tvm.cpu(0)
+        a = tvm.nd.array(np.random.uniform(size=(2, 4, 3)).astype(A.dtype), dev)
+        b = tvm.nd.array(np.random.uniform(size=(2, 1, 1)).astype(B.dtype), dev)
+        c = tvm.nd.array(np.zeros((2, 4, 3), dtype=C.dtype), dev)
         fadd(a, b, c)
-        tvm.testing.assert_allclose(c.asnumpy(), a.asnumpy() + b.asnumpy())
+        tvm.testing.assert_allclose(c.numpy(), a.numpy() + b.numpy())
 
     check()
 
@@ -178,33 +195,33 @@ def test_buffer_broadcast_expr():
         fadd = tvm.build(
             s, [A, B, C, o1, x], target="llvm", name="bcast_add", binds={A: Ab, B: Bb, C: Cc}
         )
-        ctx = tvm.cpu(0)
-        a = tvm.nd.array(np.random.uniform(size=(2, 4)).astype(A.dtype), ctx)
-        b = tvm.nd.array(np.random.uniform(size=(2, 4)).astype(B.dtype), ctx)
-        c = tvm.nd.array(np.zeros((2, 4), dtype=C.dtype), ctx)
+        dev = tvm.cpu(0)
+        a = tvm.nd.array(np.random.uniform(size=(2, 4)).astype(A.dtype), dev)
+        b = tvm.nd.array(np.random.uniform(size=(2, 4)).astype(B.dtype), dev)
+        c = tvm.nd.array(np.zeros((2, 4), dtype=C.dtype), dev)
         fadd(a, b, c, 4, 1)
-        tvm.testing.assert_allclose(c.asnumpy(), a.asnumpy() + b.asnumpy())
+        tvm.testing.assert_allclose(c.numpy(), a.numpy() + b.numpy())
 
     def check_no_stride():
         fadd = tvm.build(
             s, [A, B, C, o1, x], target="llvm", name="bcast_add", binds={A: Ab, B: Bb, C: Cc}
         )
-        ctx = tvm.cpu(0)
-        a = tvm.nd.array(np.random.uniform(size=(1, 4)).astype(A.dtype), ctx)
-        b = tvm.nd.array(np.random.uniform(size=(2, 4)).astype(B.dtype), ctx)
-        c = tvm.nd.array(np.zeros((2, 4), dtype=C.dtype), ctx)
+        dev = tvm.cpu(0)
+        a = tvm.nd.array(np.random.uniform(size=(1, 4)).astype(A.dtype), dev)
+        b = tvm.nd.array(np.random.uniform(size=(2, 4)).astype(B.dtype), dev)
+        c = tvm.nd.array(np.zeros((2, 4), dtype=C.dtype), dev)
         fadd(a, b, c, 4, 1)
-        tvm.testing.assert_allclose(c.asnumpy(), a.asnumpy() + b.asnumpy())
+        tvm.testing.assert_allclose(c.numpy(), a.numpy() + b.numpy())
 
     def check_auto_bind():
         # Let build bind buffers
         fadd = tvm.build(s, [A, B, C, o1, x], target="llvm", name="bcast_add")
-        ctx = tvm.cpu(0)
-        a = tvm.nd.array(np.random.uniform(size=(1, 4)).astype(A.dtype), ctx)
-        b = tvm.nd.array(np.random.uniform(size=(2, 4)).astype(B.dtype), ctx)
-        c = tvm.nd.array(np.zeros((2, 4), dtype=C.dtype), ctx)
+        dev = tvm.cpu(0)
+        a = tvm.nd.array(np.random.uniform(size=(1, 4)).astype(A.dtype), dev)
+        b = tvm.nd.array(np.random.uniform(size=(2, 4)).astype(B.dtype), dev)
+        c = tvm.nd.array(np.zeros((2, 4), dtype=C.dtype), dev)
         fadd(a, b, c, 4, 1)
-        tvm.testing.assert_allclose(c.asnumpy(), a.asnumpy() + b.asnumpy())
+        tvm.testing.assert_allclose(c.numpy(), a.numpy() + b.numpy())
 
     check_stride()
     check_no_stride()

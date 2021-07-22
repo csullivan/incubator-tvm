@@ -44,9 +44,12 @@ Expr MakeClip(Expr a, double a_min, double a_max);
 
 Expr MakeConcatenate(Expr data, int axis);
 
+Expr MakeMatmul(Expr tensor_a, Expr tensor_b, IndexExpr units, DataType out_dtype, bool transpose_a,
+                bool transpose_b);
+
 Expr MakeDense(Expr data, Expr weight, IndexExpr units, DataType out_dtype);
 
-Expr MakeBatchMatmul(Expr lhs, Expr rhs);
+Expr MakeBatchMatmul(Expr lhs, Expr rhs, DataType out_dtype);
 
 Expr MakeExpandDims(Expr data, int axis, int num_newaxis);
 
@@ -58,7 +61,7 @@ Expr MakeAutoSchedulerLayoutTransform(Expr data, String src_layout, String dst_l
 
 Expr MakeOnes(Array<Integer> shape, DataType dtype);
 
-Expr MakePad(Expr data, Array<Array<Integer>> pad_width, double pad_value, String pad_mode);
+Expr MakePad(Expr data, Array<Array<Integer>> pad_width, Expr pad_value, String pad_mode);
 
 Expr MakeReduce(Expr data, Array<Integer> axis, bool keepdims, bool exclude, String op_name);
 
@@ -78,7 +81,8 @@ Expr MakeStack(Expr data, int axis);
 Expr MakeTranspose(Expr data, Array<Integer> axes);
 
 Expr MakeStridedSlice(Expr data, Array<Integer> begin, Array<Integer> end, Array<Integer> strides,
-                      String slice_mode);
+                      String slice_mode,
+                      Optional<Array<Integer>> axes = NullValue<Array<Integer>>());
 
 Expr MakeTile(Expr data, Array<Integer> reps);
 
@@ -97,8 +101,9 @@ Expr MakeZeros(Array<Integer> shape, DataType dtype);
 
 Expr MakeOneHot(Expr indices, Expr on_value, Expr off_value, int depth, int axis, DataType dtype);
 
-Expr MakeResize(Expr data, Array<IndexExpr> size, String layout, String method,
-                String coordinate_transformation_mode, DataType out_dtype);
+Expr MakeResize2D(Expr data, Array<IndexExpr> size, String layout, String method,
+                  String coordinate_transformation_mode, String rounding_method, double cubic_alpha,
+                  int cubic_exclude, DataType out_dtype);
 
 Expr MakeSparseToDense(Expr indices, Array<Integer> output_shape, Expr values, Expr default_value);
 
@@ -106,7 +111,7 @@ Expr MakeArange(Expr start, Expr stop, Expr step, DataType dtype);
 
 Expr MakeShapeOf(Expr data, DataType dtype);
 
-Expr MakeTake(Expr data, Expr indices, Integer axis, String mode);
+Expr MakeTake(Expr data, Expr indices, Integer batch_dims, Integer axis, String mode);
 
 }  // namespace relay
 }  // namespace tvm

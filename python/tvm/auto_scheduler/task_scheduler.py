@@ -329,7 +329,10 @@ class TaskScheduler:
             tune_option.num_measures_per_round, tune_option.num_measure_trials // len(self.tasks)
         )
         if self.num_measures_per_round <= 0:
-            raise ValueError("num_measure_trials is too small. Please set it to a higher value.")
+            raise ValueError(
+                "num_measure_trials is too small. Please set it to a higher value."
+                f"It should be at least {len(self.tasks)} for this model."
+            )
 
         # restore the status of the task scheduler from a log file
         if self.load_log_file:
@@ -537,7 +540,7 @@ class TaskScheduler:
 
 
 class TaskSchedulerCallback:
-    """The base class of task scheduler callback functions. """
+    """The base class of task scheduler callback functions."""
 
     def pre_tune(self, task_scheduler, task_id):
         """The callback before tuning each task.
@@ -595,7 +598,7 @@ class PrintTableInfo(TaskSchedulerCallback):
 
         # overall info
         if all(cost < 1e9 for cost in task_scheduler.best_costs):
-            total_latency_str = "%.3f" % (task_scheduler.cur_score * 1e3)
+            total_latency_str = "%.3f" % (task_scheduler.cur_score.value * 1e3)
         else:
             total_latency_str = "-"
         print(
@@ -626,7 +629,7 @@ class LogEstimatedLatency(TaskSchedulerCallback):
 
     def post_tune(self, task_scheduler, task_id):
         if all(cost < 1e9 for cost in task_scheduler.best_costs):
-            total_latency_str = "%.3f" % (task_scheduler.cur_score * 1e3)
+            total_latency_str = "%.3f" % (task_scheduler.cur_score.value * 1e3)
         else:
             total_latency_str = "N/A"
 

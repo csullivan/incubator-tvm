@@ -30,7 +30,7 @@ import tvm
 from tvm import te
 import tvm.relay as relay
 from tvm import rpc
-from tvm.contrib import utils, graph_runtime as runtime
+from tvm.contrib import utils, graph_executor as runtime
 from tvm.contrib.download import download_testdata
 
 ######################################################################
@@ -162,7 +162,7 @@ data_shape = (batch_size,) + image_shape
 ######################################################################
 # Compile The Graph
 # -----------------
-# To compile the graph, we call the :any:`relay.build` function
+# To compile the graph, we call the :py:func:`relay.build` function
 # with the graph configuration and parameters. However, You cannot to
 # deploy a x86 program on a device with ARM instruction set. It means
 # Relay also needs to know the compilation option of target device,
@@ -217,8 +217,8 @@ remote.upload(lib_fname)
 rlib = remote.load_module("net.tar")
 
 # create the remote runtime module
-ctx = remote.cpu(0)
-module = runtime.GraphModule(rlib["default"](ctx))
+dev = remote.cpu(0)
+module = runtime.GraphModule(rlib["default"](dev))
 # set input data
 module.set_input("data", tvm.nd.array(x.astype("float32")))
 # run
@@ -226,5 +226,5 @@ module.run()
 # get output
 out = module.get_output(0)
 # get top1 result
-top1 = np.argmax(out.asnumpy())
+top1 = np.argmax(out.numpy())
 print("TVM prediction top-1: {}".format(synset[top1]))

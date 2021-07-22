@@ -705,12 +705,7 @@ void CodeGenCUDA::VisitStmt_(const AllocateNode* op) {
   this->PrintIndent();
   int32_t constant_size = op->constant_allocation_size();
   ICHECK_GT(constant_size, 0) << "Can only handle constant size stack allocation for now";
-  const VarNode* buffer = op->buffer_var.as<VarNode>();
-  auto it = alloc_storage_scope_.find(buffer);
-  ICHECK(it != alloc_storage_scope_.end())
-      << "Buffer " << op->buffer_var << " is missing an AttrStmt with a \"storage_scope\" key";
-
-  std::string scope = it->second;
+  std::string scope = GetPtrStorageScope(op->buffer_var);
   if (scope.find("wmma.") == 0) {
     if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
       ICHECK(op->dtype == DataType::Float(16) || op->dtype == DataType::Int(8) ||
@@ -724,6 +719,7 @@ void CodeGenCUDA::VisitStmt_(const AllocateNode* op) {
              op->dtype == DataType::Int(32))
           << "Accumulator only support half, float and int type for now";
     }
+    const VarNode* buffer = op->buffer_var.as<VarNode>();
     constant_size = GetWmmaFragmentSize(scope, buffer, constant_size);
     PrintWmmaScope(scope, op->dtype, buffer, stream);
   } else {
@@ -759,7 +755,7 @@ void CodeGenCUDA::VisitStmt_(const EvaluateNode* op) {
 }
 
 void CodeGenCUDA::VisitExpr_(const RampNode* op, std::ostream& os) {
-  os << "((make_int" << op->lanes << ")(";
+  os << "(make_int" << op->lanes << "(";
   for (int i = 0; i < op->lanes; i++) {
     os << "(" << PrintExpr(op->base) << ")"
        << "+(" << PrintExpr(op->stride) << "*" << i << ")";
@@ -807,6 +803,50 @@ void CodeGenCUDA::VisitExpr_(const BroadcastNode* op, std::ostream& os) {  // NO
     }
     os << ')';
     return;
+  }
+
+  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
+    bool fail = false;
+    const int64_t* p = as_const_int(op->value);
+    ICHECK(p);
+    int64_t v = *p & 0xF;
+
+    if (op->lanes == 4) {
+      v = (v << 12) | (v << 8) | (v << 4) | v;
+      if (op->dtype.is_uint()) {
+        os << "(uint16_t)" << v;
+      } else {
+        os << "(int16_t)" << v;
+      }
+    } else {
+      v = (v << 28) | (v << 24) | (v << 20) | (v << 16) | (v << 12) | (v << 8) | (v << 4) | v;
+      if (op->lanes == 8) {
+        if (op->dtype.is_uint()) {
+          os << "(uint)" << v;
+        } else {
+          os << "(int)" << v;
+        }
+      } else if (op->lanes == 16 || op->lanes == 32) {
+        os << "make_";
+        PrintType(op->dtype, os);
+        os << '(';
+        for (int i = 0; i < op->lanes / 8; ++i) {
+          if (i != 0) os << ", ";
+          if (op->dtype.is_uint()) {
+            os << "(uint)" << v;
+          } else {
+            os << "(int)" << v;
+          }
+        }
+        os << ')';
+      } else {
+        fail = true;
+      }
+    }
+
+    if (!fail) {
+      return;
+    }
   }
 
   std::string v = PrintExpr(op->value);

@@ -141,7 +141,7 @@ class IRBuilder(object):
     """
 
     def __init__(self):
-        self._seq_stack = [[]]
+        self._seq_stack = [[]]  # type: ignore
         self.nidx = 0
 
     def _pop_seq(self):
@@ -374,7 +374,27 @@ class IRBuilder(object):
 
         return WithScope(None, _exit_cb)
 
-    def allocate(self, dtype, shape, name="buf", scope=None):
+    def let(self, var_name, value):
+        """Create a new let stmt binding.
+
+        Parameters
+        ----------
+        var_name : str
+            The name of the variable
+
+        value : PrimExpr
+            The value to be bound
+
+        Returns
+        -------
+        var : tvm.tir.Var
+           The var that can be in for future emits.
+        """
+        var = _expr.Var(var_name, dtype=value.dtype)
+        self.emit(lambda x: _stmt.LetStmt(var, value, x))
+        return var
+
+    def allocate(self, dtype, shape, name="buf", scope=""):
         """Create a allocate statement.
 
         Parameters
@@ -396,7 +416,7 @@ class IRBuilder(object):
         buffer : BufferVar
             The buffer var representing the buffer.
         """
-        buffer_var = _expr.Var(name, PointerType(PrimType(dtype)))
+        buffer_var = _expr.Var(name, PointerType(PrimType(dtype), scope))
         if not isinstance(shape, (list, tuple, _container.Array)):
             shape = [shape]
         if scope:
@@ -404,7 +424,7 @@ class IRBuilder(object):
         self.emit(lambda x: _stmt.Allocate(buffer_var, dtype, shape, const(1, dtype="uint1"), x))
         return BufferVar(self, buffer_var, shape, dtype)
 
-    def pointer(self, content_type, name="ptr"):
+    def pointer(self, content_type, name="ptr", scope=""):
         """Create pointer variable with content type.
 
         Parameters
@@ -415,12 +435,15 @@ class IRBuilder(object):
         name : str, optional
             The name of the pointer.
 
+        scope : str, optional
+            The scope of the pointer.
+
         Returns
         -------
         ptr : BufferVar
             The buffer var representing the buffer.
         """
-        buffer_var = _expr.Var(name, dtype="handle")
+        buffer_var = _expr.Var(name, PointerType(PrimType(content_type), scope))
         return BufferVar(self, buffer_var, None, content_type)
 
     def buffer_ptr(self, buf, shape=None):

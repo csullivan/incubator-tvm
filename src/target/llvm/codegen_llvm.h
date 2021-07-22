@@ -27,7 +27,6 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/module.h>
-#include <tvm/runtime/container.h>
 #include <tvm/target/codegen.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/expr.h>
@@ -164,8 +163,6 @@ class CodeGenLLVM : public ExprFunctor<llvm::Value*(const PrimExpr&)>,
  protected:
   /*! \brief The storage information */
   struct StorageInfo {
-    /*! \brief The storage scope */
-    runtime::StorageScope scope;
     /*! \brief The alignment of allocation */
     int alignment{0};
   };

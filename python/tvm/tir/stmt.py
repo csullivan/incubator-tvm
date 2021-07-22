@@ -26,12 +26,13 @@ Each statement node have subfields that can be visited from python side.
     assert isinstance(st, tvm.tir.stmt.Store)
     assert(st.buffer_var == a)
 """
-from typing import List, Optional, Mapping
 from enum import IntEnum
-import tvm._ffi
+from typing import List, Mapping, Optional, Union
 
-from tvm.runtime import Object
-from tvm.ir import Span, PrimExpr, Range
+import tvm._ffi
+from tvm.ir import PrimExpr, Range, Span
+from tvm.runtime import Object, const
+
 from . import _ffi_api
 from .buffer import Buffer
 from .expr import IterVar
@@ -61,7 +62,9 @@ class LetStmt(Stmt):
     """
 
     def __init__(self, var, value, body, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.LetStmt, var, value, body, span)
+        self.__init_handle_by_constructor__(
+            _ffi_api.LetStmt, var, value, body, span  # type: ignore
+        )
 
 
 @tvm._ffi.register_object("tir.AssertStmt")
@@ -76,7 +79,7 @@ class AssertStmt(Stmt):
     message : PrimExpr
         The error message.
 
-    body : Stmt
+    body : tvm.tir.Stmt
         The body statement.
 
     span : Optional[Span]
@@ -84,7 +87,9 @@ class AssertStmt(Stmt):
     """
 
     def __init__(self, condition, message, body, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.AssertStmt, condition, message, body, span)
+        self.__init_handle_by_constructor__(
+            _ffi_api.AssertStmt, condition, message, body, span  # type: ignore
+        )
 
 
 class ForKind(IntEnum):
@@ -147,7 +152,7 @@ class For(Stmt):
         span=None,
     ):
         self.__init_handle_by_constructor__(
-            _ffi_api.For,
+            _ffi_api.For,  # type: ignore
             loop_var,
             min_val,
             extent,
@@ -177,7 +182,7 @@ class While(Stmt):
 
     def __init__(self, condition, body, span=None):
         self.__init_handle_by_constructor__(
-            _ffi_api.While,
+            _ffi_api.While,  # type: ignore
             condition,
             body,
             span,
@@ -208,9 +213,9 @@ class Store(Stmt):
 
     def __init__(self, buffer_var, value, index, predicate=None, span=None):
         if predicate is None:
-            predicate = _ffi_api.const_true(value.dtype, span)
+            predicate = _ffi_api.const_true(value.dtype, span)  # type: ignore
         self.__init_handle_by_constructor__(
-            _ffi_api.Store, buffer_var, value, index, predicate, span
+            _ffi_api.Store, buffer_var, value, index, predicate, span  # type: ignore
         )
 
 
@@ -234,7 +239,9 @@ class BufferStore(Stmt):
     """
 
     def __init__(self, buffer, value, indices, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.BufferStore, buffer, value, indices, span)
+        self.__init_handle_by_constructor__(
+            _ffi_api.BufferStore, buffer, value, indices, span  # type: ignore
+        )
 
 
 @tvm._ffi.register_object("tir.BufferRealize")
@@ -261,7 +268,7 @@ class BufferRealize(Stmt):
 
     def __init__(self, buffer, bounds, condition, body, span=None):
         self.__init_handle_by_constructor__(
-            _ffi_api.BufferRealize, buffer, bounds, condition, body, span
+            _ffi_api.BufferRealize, buffer, bounds, condition, body, span  # type: ignore
         )
 
 
@@ -285,7 +292,9 @@ class ProducerStore(Stmt):
     """
 
     def __init__(self, producer, value, indices, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.ProducerStore, producer, value, indices, span)
+        self.__init_handle_by_constructor__(
+            _ffi_api.ProducerStore, producer, value, indices, span  # type: ignore
+        )
 
 
 @tvm._ffi.register_object("tir.Allocate")
@@ -315,7 +324,7 @@ class Allocate(Stmt):
 
     def __init__(self, buffer_var, dtype, extents, condition, body, span=None):
         self.__init_handle_by_constructor__(
-            _ffi_api.Allocate, buffer_var, dtype, extents, condition, body, span
+            _ffi_api.Allocate, buffer_var, dtype, extents, condition, body, span  # type: ignore
         )
 
 
@@ -342,7 +351,9 @@ class AttrStmt(Stmt):
     """
 
     def __init__(self, node, attr_key, value, body, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.AttrStmt, node, attr_key, value, body, span)
+        self.__init_handle_by_constructor__(
+            _ffi_api.AttrStmt, node, attr_key, value, body, span  # type: ignore
+        )
 
 
 @tvm._ffi.register_object("tir.ProducerRealize")
@@ -363,13 +374,22 @@ class ProducerRealize(Stmt):
     body : Stmt
         The realize body
 
+    storage_scope : str
+        The storage scope associated with this realization
+
     span : Optional[Span]
         The location of this itervar in the source code.
     """
 
-    def __init__(self, producer, bounds, condition, body, span=None):
+    def __init__(self, producer, bounds, condition, body, storage_scope="", span=None):
         self.__init_handle_by_constructor__(
-            _ffi_api.ProducerRealize, producer, bounds, condition, body, span
+            _ffi_api.ProducerRealize,
+            producer,
+            bounds,
+            condition,
+            body,
+            storage_scope,
+            span,  # type: ignore
         )
 
 
@@ -387,7 +407,7 @@ class SeqStmt(Stmt):
     """
 
     def __init__(self, seq, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.SeqStmt, seq, span)
+        self.__init_handle_by_constructor__(_ffi_api.SeqStmt, seq, span)  # type: ignore
 
     def __getitem__(self, i):
         return self.seq[i]
@@ -417,7 +437,7 @@ class IfThenElse(Stmt):
 
     def __init__(self, condition, then_case, else_case, span=None):
         self.__init_handle_by_constructor__(
-            _ffi_api.IfThenElse, condition, then_case, else_case, span
+            _ffi_api.IfThenElse, condition, then_case, else_case, span  # type: ignore
         )
 
 
@@ -435,7 +455,7 @@ class Evaluate(Stmt):
     """
 
     def __init__(self, value, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.Evaluate, value, span)
+        self.__init_handle_by_constructor__(_ffi_api.Evaluate, value, span)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.Prefetch")
@@ -455,7 +475,7 @@ class Prefetch(Stmt):
     """
 
     def __init__(self, buffer, bounds, span=None):
-        self.__init_handle_by_constructor__(_ffi_api.Prefetch, buffer, bounds, span)
+        self.__init_handle_by_constructor__(_ffi_api.Prefetch, buffer, bounds, span)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.BufferRegion")
@@ -475,7 +495,7 @@ class BufferRegion(Object):
     region: List[Range]
 
     def __init__(self, buffer: Buffer, region: List[Range]):
-        self.__init_handle_by_constructor__(_ffi_api.BufferRegion, buffer, region)
+        self.__init_handle_by_constructor__(_ffi_api.BufferRegion, buffer, region)  # type: ignore
 
 
 @tvm._ffi.register_object("tir.MatchBufferRegion")
@@ -495,7 +515,9 @@ class MatchBufferRegion(Object):
     source: BufferRegion
 
     def __init__(self, buffer: Buffer, source: BufferRegion):
-        self.__init_handle_by_constructor__(_ffi_api.MatchBufferRegion, buffer, source)
+        self.__init_handle_by_constructor__(
+            _ffi_api.MatchBufferRegion, buffer, source  # type: ignore
+        )
 
 
 @tvm._ffi.register_object("tir.Block")
@@ -566,7 +588,7 @@ class Block(Stmt):
         if annotations is None:
             annotations = {}
         self.__init_handle_by_constructor__(
-            _ffi_api.Block,
+            _ffi_api.Block,  # type: ignore
             iter_vars,
             reads,
             writes,
@@ -577,7 +599,7 @@ class Block(Stmt):
             match_buffers,
             annotations,
             span,
-        )
+        )  # type: ignore
 
 
 @tvm._ffi.register_object("tir.BlockRealize")
@@ -589,7 +611,7 @@ class BlockRealize(Stmt):
     iter_values : List[PrimExpr]
         The binding values of the block var.
 
-    predicate : PrimExpr
+    predicate : Union[PrimExpr, bool]
         The predicate of the block.
 
     block : Block
@@ -607,13 +629,19 @@ class BlockRealize(Stmt):
     def __init__(
         self,
         iter_values: List[PrimExpr],
-        predicate: PrimExpr,
+        predicate: Union[PrimExpr, bool],
         block: Block,
         span: Optional[Span] = None,
     ):
+        if isinstance(predicate, bool):
+            predicate = const(predicate, "bool")
         self.__init_handle_by_constructor__(
-            _ffi_api.BlockRealize, iter_values, predicate, block, span
-        )
+            _ffi_api.BlockRealize,  # type: ignore
+            iter_values,
+            predicate,
+            block,
+            span,
+        )  # type: ignore
 
 
 def stmt_seq(*args):

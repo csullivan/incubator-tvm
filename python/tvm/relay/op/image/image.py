@@ -20,23 +20,26 @@ from ..dyn.image import _make as _dyn_make
 from ...expr import Expr, Constant
 
 
-def resize(
+def resize1d(
     data,
     size,
-    layout="NCHW",
-    method="bilinear",
+    layout="NCW",
+    method="linear",
     coordinate_transformation_mode="half_pixel",
+    rounding_method="",
+    cubic_alpha=-0.5,
+    cubic_exclude=0,
     out_dtype=None,
 ):
-    """Image resize operator.
+    """Image resize1d operator.
 
-    This operator takes data as input and does 2D scaling to the given scale factor.
-    In the default case, where the data_layout is `NCHW`
-    with data of shape (n, c, h, w)
-    out will have a shape (n, c, size[0], size[1])
+    This operator takes data as input and does 1D scaling to the given scale factor.
+    In the default case, where the data_layout is `NCW`
+    with data of shape (n, c, w)
+    out will have a shape (n, c, size[0])
 
     method indicates the algorithm to be used while calculating the out value
-    and method can be one of ("bilinear", "nearest_neighbor", "bicubic")
+    and method can be one of ("linear", "nearest_neighbor", "cubic")
 
     Parameters
     ----------
@@ -50,13 +53,23 @@ def resize(
         Layout of the input.
 
     method : str, optional
-        Scale method to used [nearest_neighbor, bilinear, bicubic].
+        Scale method to used [nearest_neighbor, linear, cubic].
 
     coordinate_transformation_mode : string, optional
         Describes how to transform the coordinate in the resized tensor
         to the coordinate in the original tensor.
         Refer to the ONNX Resize operator specification for details.
         [half_pixel, align_corners, asymmetric]
+
+    rounding_method: string, optional
+        indicates how to find the "nearest" pixel in nearest_neighbor method
+        [round, floor, ceil]
+
+    cubic_alpha: float
+        Spline Coefficient for cubic interpolation
+
+    cubic_exclude: int
+            Flag to exclude exterior of the image during cubic interpolation
 
     out_dtype : str, optional
         Type to return. If left None returns the same type as input.
@@ -67,50 +80,72 @@ def resize(
         The resized result.
     """
     if isinstance(size, Constant):
-        size = list(size.data.asnumpy().astype("int32"))
+        size = list(size.data.numpy().astype("int32"))
     if isinstance(size, Expr):
-        return _dyn_make.resize(
-            data, size, layout, method, coordinate_transformation_mode, out_dtype
-        )
-    return _make.resize(data, size, layout, method, coordinate_transformation_mode, out_dtype)
+        raise NotImplementedError("dyn.resize1d is not yet implemented, got size", size)
+    return _make.resize1d(
+        data,
+        size,
+        layout,
+        method,
+        coordinate_transformation_mode,
+        rounding_method,
+        cubic_alpha,
+        cubic_exclude,
+        out_dtype,
+    )
 
 
-def resize3d(
+def resize2d(
     data,
     size,
-    layout="NCDHW",
-    method="trilinear",
+    layout="NCHW",
+    method="linear",
     coordinate_transformation_mode="half_pixel",
+    rounding_method="",
+    cubic_alpha=-0.5,
+    cubic_exclude=0,
     out_dtype=None,
 ):
-    """Image resize 3D operator.
+    """Image resize2d operator.
 
-    This operator takes data as input and does 3D scaling to the given scale factor.
-    In the default case, where the data_layout is `NCDHW`
-    with data of shape `(n, c, d, h, w)`
-    out will have a shape `(n, c, size[0], size[1], size[2])`
+    This operator takes data as input and does 2D scaling to the given scale factor.
+    In the default case, where the data_layout is `NCHW`
+    with data of shape (n, c, h, w)
+    out will have a shape (n, c, size[0], size[1])
 
     method indicates the algorithm to be used while calculating the out value
-    and method can be one of ("trilinear", "nearest_neighbor")
+    and method can be one of ("linear", "nearest_neighbor", "cubic")
 
     Parameters
     ----------
     data : relay.Expr
         The input data to the operator.
 
-    size: Tuple of Expr
+    size: Tuple of Int or Expr
         The out size to which the image will be resized.
 
     layout : str, optional
         Layout of the input.
 
     method : str, optional
-        Scale method to used [nearest_neighbor, trilinear].
+        Scale method to used [nearest_neighbor, linear, cubic].
 
     coordinate_transformation_mode : string, optional
         Describes how to transform the coordinate in the resized tensor
         to the coordinate in the original tensor.
+        Refer to the ONNX Resize operator specification for details.
         [half_pixel, align_corners, asymmetric]
+
+    rounding_method: string, optional
+        indicates how to find the "nearest" pixel in nearest_neighbor method
+        [round, floor, ceil]
+
+    cubic_alpha: float
+        Spline Coefficient for bicubic interpolation
+
+    cubic_exclude: int
+            Flag to exclude exterior of the image during bicubic interpolation
 
     out_dtype : str, optional
         Type to return. If left None returns the same type as input.
@@ -120,7 +155,107 @@ def resize3d(
     result: relay.Expr
         The resized result.
     """
-    return _make.resize3d(data, size, layout, method, coordinate_transformation_mode, out_dtype)
+    if isinstance(size, Constant):
+        size = list(size.data.numpy().astype("int32"))
+    if isinstance(size, Expr):
+        return _dyn_make.resize2d(
+            data,
+            size,
+            layout,
+            method,
+            coordinate_transformation_mode,
+            rounding_method,
+            cubic_alpha,
+            cubic_exclude,
+            out_dtype,
+        )
+    return _make.resize2d(
+        data,
+        size,
+        layout,
+        method,
+        coordinate_transformation_mode,
+        rounding_method,
+        cubic_alpha,
+        cubic_exclude,
+        out_dtype,
+    )
+
+
+def resize3d(
+    data,
+    size,
+    layout="NCDHW",
+    method="linear",
+    coordinate_transformation_mode="half_pixel",
+    rounding_method="",
+    cubic_alpha=-0.5,
+    cubic_exclude=0,
+    out_dtype=None,
+):
+    """Image resize3d operator.
+
+    This operator takes data as input and does 3D scaling to the given scale factor.
+    In the default case, where the data_layout is `NCDHW`
+    with data of shape `(n, c, d, h, w)`
+    out will have a shape `(n, c, size[0], size[1], size[2])`
+
+    method indicates the algorithm to be used while calculating the out value
+    and method can be one of ("linear", "nearest_neighbor", "cubic")
+
+    Parameters
+    ----------
+    data : relay.Expr
+        The input data to the operator.
+
+    size: Tuple of Int or Expr
+        The out size to which the image will be resized.
+
+    layout : str, optional
+        Layout of the input.
+
+    method : str, optional
+        Scale method to used [nearest_neighbor, linear, cubic].
+
+    coordinate_transformation_mode : string, optional
+        Describes how to transform the coordinate in the resized tensor
+        to the coordinate in the original tensor.
+        Refer to the ONNX Resize operator specification for details.
+        [half_pixel, align_corners, asymmetric]
+
+    rounding_method: string, optional
+        indicates how to find the "nearest" pixel in nearest_neighbor method
+        [round, floor, ceil]
+
+    cubic_alpha: float
+        Spline Coefficient for cubic interpolation
+
+    cubic_exclude: int
+            Flag to exclude exterior of the image during cubic interpolation
+
+    out_dtype : str, optional
+        Type to return. If left None returns the same type as input.
+
+    Returns
+    -------
+    result: relay.Expr
+        The resized result.
+    """
+    if isinstance(size, Constant):
+        size = list(size.data.numpy().astype("int32"))
+    if isinstance(size, Expr):
+        raise NotImplementedError("dyn.resize3d is not yet implemented, got size", size)
+    return _make.resize3d(
+        data,
+        size,
+        layout,
+        method,
+        coordinate_transformation_mode,
+        rounding_method,
+        cubic_alpha,
+        cubic_exclude,
+        out_dtype,
+    )
 
 
 def crop_and_resize(
@@ -151,7 +286,7 @@ def crop_and_resize(
         A 1-D tensor of shape [num_boxes], box_ind[i] specifies the data that
         the i-th box refers to.
 
-    crop_size : Tuple of Expr
+    crop_size : Tuple of PrimExpr
         The target size to which each box will be resized.
 
     layout : str, optional

@@ -18,6 +18,7 @@
 Python API
 ==========
 
+
 .. toctree::
    :maxdepth: 2
 
@@ -44,6 +45,6 @@ Python API
    rpc
    micro
    contrib
-   graph_runtime
+   graph_executor
    topi
    vta/index

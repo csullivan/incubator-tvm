@@ -78,16 +78,16 @@ def compile_depthwise_NHWC_int8_arm(
     bias = te.placeholder((in_channel * depth_multiplier,), name="bias", dtype="int32")
     dtype = "int32"
 
-    device = "llvm -device=arm_cpu -mtriple=aarch64-linux-gnu"
+    target = "llvm -device=arm_cpu -mtriple=aarch64-linux-gnu"
     compute = topi.arm_cpu.compute_depthwise_conv2d_nhwc
     schedule = topi.arm_cpu.schedule_depthwise_conv2d_nhwc
 
-    if not tvm.testing.device_enabled(device):
-        print("Skip because %s is not enabled" % device)
+    if not tvm.testing.device_enabled(target):
+        print("Skip because %s is not enabled" % target)
         return
 
-    print("Compiling on arm AArch64 target: %s" % device)
-    with tvm.target.Target(device):
+    print("Compiling on arm AArch64 target: %s" % target)
+    with tvm.target.Target(target):
         assert topi.arm_cpu.arm_utils.is_aarch64_arm(), "AArch64 target not recognized"
 
         C = compute(A, W, (stride, stride), padding, (dilation, dilation), dtype)
@@ -102,13 +102,22 @@ def compile_depthwise_NHWC_int8_arm(
         func = tvm.build(
             s,
             ins_outs,
-            device,
+            target,
             name="depthwise_conv2d",
         )
 
 
 def depthwise_conv2d_with_workload_nchw(
-    batch, in_channel, in_height, channel_multiplier, filter_height, stride, padding, dilation=1
+    target,
+    dev,
+    batch,
+    in_channel,
+    in_height,
+    channel_multiplier,
+    filter_height,
+    stride,
+    padding,
+    dilation=1,
 ):
     in_width = in_height
     filter_channel = in_channel
@@ -133,17 +142,15 @@ def depthwise_conv2d_with_workload_nchw(
 
     dtype = "float32"
 
-    def check_device(device, ctx):
-        print("Running on target: %s" % device)
-
-        impl_list = tvm.topi.testing.dispatch(device, _depthwise_conv2d_nchw_implement)[:]
-        if device == "llvm" and channel_multiplier == 1 and dilation == 1:
+    with autotvm.tophub.context(target):  # load tophub pre-tuned parameters
+        impl_list = tvm.topi.testing.dispatch(target, _depthwise_conv2d_nchw_implement)[:]
+        if target == "llvm" and channel_multiplier == 1 and dilation == 1:
             impl_list.append(
                 (topi.x86.depthwise_conv2d_nchw, topi.x86.schedule_depthwise_conv2d_nchw)
             )
 
         for fcompute, fschedule in impl_list:
-            with tvm.target.Target(device):
+            with tvm.target.Target(target):
                 # declare
                 DepthwiseConv2d = fcompute(
                     Input, Filter, (stride_h, stride_w), padding_args, dilation, dtype
@@ -155,9 +162,9 @@ def depthwise_conv2d_with_workload_nchw(
                 s2 = fschedule(ScaleShift)
                 s3 = fschedule(Relu)
             # build the kernels
-            f1 = tvm.build(s1, [Input, Filter, DepthwiseConv2d], device)
-            f2 = tvm.build(s2, [Input, Filter, Scale, Shift, ScaleShift], device)
-            f3 = tvm.build(s3, [Input, Filter, Scale, Shift, Relu], device)
+            f1 = tvm.build(s1, [Input, Filter, DepthwiseConv2d], target)
+            f2 = tvm.build(s2, [Input, Filter, Scale, Shift, ScaleShift], target)
+            f3 = tvm.build(s3, [Input, Filter, Scale, Shift, Relu], target)
 
             # Prepare pod type for test data closure
             input_shape = get_const_tuple(Input.shape)
@@ -214,52 +221,57 @@ def depthwise_conv2d_with_workload_nchw(
                 )
 
                 # check if tile_ow candidates are the factors of the right output weight.
-                with tvm.target.Target(device):
+                with tvm.target.Target(target):
                     cfg = autotvm.get_config()
                     _fallback_schedule(cfg, wkl)
                     ow_tile = np.prod(cfg["tile_ow"].size)
 
                     tvm.testing.assert_allclose(ow_tile, out_width)
 
-            if "llvm" in device:
+            if "llvm" in target:
                 verify_workload_padding()
 
-            input_tvm = tvm.nd.array(input_np, ctx)
-            filter_tvm = tvm.nd.array(filter_np, ctx)
-            scale_tvm = tvm.nd.array(scale_np, ctx)
-            shift_tvm = tvm.nd.array(shift_np, ctx)
+            input_tvm = tvm.nd.array(input_np, dev)
+            filter_tvm = tvm.nd.array(filter_np, dev)
+            scale_tvm = tvm.nd.array(scale_np, dev)
+            shift_tvm = tvm.nd.array(shift_np, dev)
             depthwise_conv2d_tvm = tvm.nd.array(
                 np.zeros(shape=get_const_tuple(DepthwiseConv2d.shape), dtype=DepthwiseConv2d.dtype),
-                ctx,
+                dev,
             )
             scale_shift_tvm = tvm.nd.array(
-                np.zeros(shape=get_const_tuple(ScaleShift.shape), dtype=ScaleShift.dtype), ctx
+                np.zeros(shape=get_const_tuple(ScaleShift.shape), dtype=ScaleShift.dtype), dev
             )
             relu_tvm = tvm.nd.array(
-                np.zeros(shape=get_const_tuple(Relu.shape), dtype=Relu.dtype), ctx
+                np.zeros(shape=get_const_tuple(Relu.shape), dtype=Relu.dtype), dev
             )
             # launch kernel 1 (depthwise_conv2d)
-            timer_1 = f1.time_evaluator(f1.entry_name, ctx, number=1)
+            timer_1 = f1.time_evaluator(f1.entry_name, dev, number=1)
             tcost_1 = timer_1(input_tvm, filter_tvm, depthwise_conv2d_tvm).mean
             # launch kernel 2 (depthwise_conv2d + scale_shift)
-            timer_2 = f2.time_evaluator(f2.entry_name, ctx, number=1)
+            timer_2 = f2.time_evaluator(f2.entry_name, dev, number=1)
             tcost_2 = timer_2(input_tvm, filter_tvm, scale_tvm, shift_tvm, scale_shift_tvm).mean
             # launch kernel 3 (depthwise_conv2d + scale_shift + relu)
-            timer_3 = f3.time_evaluator(f3.entry_name, ctx, number=1)
+            timer_3 = f3.time_evaluator(f3.entry_name, dev, number=1)
             tcost_3 = timer_3(input_tvm, filter_tvm, scale_tvm, shift_tvm, relu_tvm).mean
             tvm.testing.assert_allclose(
-                depthwise_conv2d_tvm.asnumpy(), depthwise_conv2d_scipy, rtol=1e-5
+                depthwise_conv2d_tvm.numpy(), depthwise_conv2d_scipy, rtol=1e-5
             )
-            tvm.testing.assert_allclose(scale_shift_tvm.asnumpy(), scale_shift_scipy, rtol=1e-5)
-            tvm.testing.assert_allclose(relu_tvm.asnumpy(), relu_scipy, rtol=1e-5)
-
-    for device, ctx in tvm.testing.enabled_targets():
-        with autotvm.tophub.context(device):  # load tophub pre-tuned parameters
-            check_device(device, ctx)
+            tvm.testing.assert_allclose(scale_shift_tvm.numpy(), scale_shift_scipy, rtol=1e-5)
+            tvm.testing.assert_allclose(relu_tvm.numpy(), relu_scipy, rtol=1e-5)
 
 
 def depthwise_conv2d_with_workload_nhwc(
-    batch, in_channel, in_height, channel_multiplier, filter_height, stride_h, padding, dilation=1
+    target,
+    dev,
+    batch,
+    in_channel,
+    in_height,
+    channel_multiplier,
+    filter_height,
+    stride_h,
+    padding,
+    dilation=1,
 ):
     in_width = in_height
     filter_channel = in_channel
@@ -284,11 +296,9 @@ def depthwise_conv2d_with_workload_nhwc(
 
     dtype = "float32"
 
-    def check_device(device, ctx):
-        print("Running on target: %s" % device)
-
-        fcompute, fschedule = tvm.topi.testing.dispatch(device, _depthwise_conv2d_nhwc_implement)
-        with tvm.target.Target(device):
+    with autotvm.tophub.context(target):  # load tophub pre-tuned parameters
+        fcompute, fschedule = tvm.topi.testing.dispatch(target, _depthwise_conv2d_nhwc_implement)
+        with tvm.target.Target(target):
             # declare
             DepthwiseConv2d = fcompute(
                 Input, Filter, (stride_h, stride_w), padding_args, dilation, dtype
@@ -300,9 +310,9 @@ def depthwise_conv2d_with_workload_nhwc(
             s2 = fschedule(ScaleShift)
             s3 = fschedule(Relu)
         # build the kernels
-        f1 = tvm.build(s1, [Input, Filter, DepthwiseConv2d], device)
-        f2 = tvm.build(s2, [Input, Filter, Scale, Shift, ScaleShift], device)
-        f3 = tvm.build(s3, [Input, Filter, Scale, Shift, Relu], device)
+        f1 = tvm.build(s1, [Input, Filter, DepthwiseConv2d], target)
+        f2 = tvm.build(s2, [Input, Filter, Scale, Shift, ScaleShift], target)
+        f3 = tvm.build(s3, [Input, Filter, Scale, Shift, Relu], target)
 
         # Prepare pod type for test data closure
         input_shape = get_const_tuple(Input.shape)
@@ -353,36 +363,30 @@ def depthwise_conv2d_with_workload_nhwc(
         ) = get_ref_data()
 
         # prepare data
-        input_tvm = tvm.nd.array(input_np, ctx)
-        filter_tvm = tvm.nd.array(filter_np, ctx)
-        scale_tvm = tvm.nd.array(scale_np, ctx)
-        shift_tvm = tvm.nd.array(shift_np, ctx)
+        input_tvm = tvm.nd.array(input_np, dev)
+        filter_tvm = tvm.nd.array(filter_np, dev)
+        scale_tvm = tvm.nd.array(scale_np, dev)
+        shift_tvm = tvm.nd.array(shift_np, dev)
         depthwise_conv2d_tvm = tvm.nd.array(
-            np.zeros(shape=get_const_tuple(DepthwiseConv2d.shape), dtype=DepthwiseConv2d.dtype), ctx
+            np.zeros(shape=get_const_tuple(DepthwiseConv2d.shape), dtype=DepthwiseConv2d.dtype), dev
         )
         scale_shift_tvm = tvm.nd.array(
-            np.zeros(shape=get_const_tuple(ScaleShift.shape), dtype=ScaleShift.dtype), ctx
+            np.zeros(shape=get_const_tuple(ScaleShift.shape), dtype=ScaleShift.dtype), dev
         )
-        relu_tvm = tvm.nd.array(np.zeros(shape=get_const_tuple(Relu.shape), dtype=Relu.dtype), ctx)
+        relu_tvm = tvm.nd.array(np.zeros(shape=get_const_tuple(Relu.shape), dtype=Relu.dtype), dev)
         # launch kernel 1 (depthwise_conv2d)
-        timer_1 = f1.time_evaluator(f1.entry_name, ctx, number=1)
+        timer_1 = f1.time_evaluator(f1.entry_name, dev, number=1)
         tcost_1 = timer_1(input_tvm, filter_tvm, depthwise_conv2d_tvm).mean
         # launch kernel 2 (depthwise_conv2d + scale_shift)
-        timer_2 = f2.time_evaluator(f2.entry_name, ctx, number=1)
+        timer_2 = f2.time_evaluator(f2.entry_name, dev, number=1)
         tcost_2 = timer_2(input_tvm, filter_tvm, scale_tvm, shift_tvm, scale_shift_tvm).mean
         # launch kernel 3 (depthwise_conv2d + scale_shift + relu)
-        timer_3 = f3.time_evaluator(f3.entry_name, ctx, number=1)
+        timer_3 = f3.time_evaluator(f3.entry_name, dev, number=1)
         tcost_3 = timer_3(input_tvm, filter_tvm, scale_tvm, shift_tvm, relu_tvm).mean
         relu_scipy = np.maximum(scale_shift_scipy, 0)
-        tvm.testing.assert_allclose(
-            depthwise_conv2d_tvm.asnumpy(), depthwise_conv2d_scipy, rtol=1e-5
-        )
-        tvm.testing.assert_allclose(scale_shift_tvm.asnumpy(), scale_shift_scipy, rtol=1e-5)
-        tvm.testing.assert_allclose(relu_tvm.asnumpy(), relu_scipy, rtol=1e-5)
-
-    for device, ctx in tvm.testing.enabled_targets():
-        with autotvm.tophub.context(device):  # load tophub pre-tuned parameters
-            check_device(device, ctx)
+        tvm.testing.assert_allclose(depthwise_conv2d_tvm.numpy(), depthwise_conv2d_scipy, rtol=1e-5)
+        tvm.testing.assert_allclose(scale_shift_tvm.numpy(), scale_shift_scipy, rtol=1e-5)
+        tvm.testing.assert_allclose(relu_tvm.numpy(), relu_scipy, rtol=1e-5)
 
 
 def _transform_data(data, bn):
@@ -404,7 +408,16 @@ def _transform_kernel(kernel, bn):
 
 
 def depthwise_conv2d_with_workload_NCHWc(
-    batch, in_channel, in_height, channel_multiplier, filter_height, stride, padding, dilation=1
+    target,
+    dev,
+    batch,
+    in_channel,
+    in_height,
+    channel_multiplier,
+    filter_height,
+    stride,
+    padding,
+    dilation=1,
 ):
     in_width = in_height
     filter_channel = in_channel
@@ -444,13 +457,9 @@ def depthwise_conv2d_with_workload_NCHWc(
     out_layout = "NCHW%dc" % oc_block
     dtype = "float32"
 
-    def check_device(device):
-        ctx = tvm.context(device, 0)
-        if not tvm.testing.device_enabled(device):
-            print("Skip because %s is not enabled" % device)
-            return
-        print("Running on target: %s" % device)
-        with tvm.target.Target(device):
+    with autotvm.tophub.context(target):  # load tophub pre-tuned parameters
+        dev = tvm.device(target, 0)
+        with tvm.target.Target(target):
             # declare
             DepthwiseConv2d = topi.x86.depthwise_conv2d_NCHWc(
                 Input,
@@ -468,8 +477,8 @@ def depthwise_conv2d_with_workload_NCHWc(
             s1 = topi.x86.schedule_depthwise_conv2d_NCHWc(DepthwiseConv2d)
             s2 = topi.x86.schedule_depthwise_conv2d_NCHWc(Relu)
         # build the kernels
-        f1 = tvm.build(s1, [Input, Filter, DepthwiseConv2d], device)
-        f2 = tvm.build(s2, [Input, Filter, Relu], device)
+        f1 = tvm.build(s1, [Input, Filter, DepthwiseConv2d], target)
+        f2 = tvm.build(s2, [Input, Filter, Relu], target)
 
         # Prepare pod type for test data closure
         input_shape = (batch, in_channel, in_height, in_width)
@@ -498,65 +507,65 @@ def depthwise_conv2d_with_workload_NCHWc(
         # Get the test data
         (input_np, filter_np, depthwise_conv2d_scipy, relu_scipy) = get_ref_data()
 
-        input_tvm = tvm.nd.array(input_np, ctx)
-        filter_tvm = tvm.nd.array(filter_np, ctx)
+        input_tvm = tvm.nd.array(input_np, dev)
+        filter_tvm = tvm.nd.array(filter_np, dev)
 
         depthwise_conv2d_tvm = tvm.nd.array(
-            np.zeros(shape=get_const_tuple(DepthwiseConv2d.shape), dtype=DepthwiseConv2d.dtype), ctx
+            np.zeros(shape=get_const_tuple(DepthwiseConv2d.shape), dtype=DepthwiseConv2d.dtype), dev
         )
-        relu_tvm = tvm.nd.array(np.zeros(shape=get_const_tuple(Relu.shape), dtype=Relu.dtype), ctx)
+        relu_tvm = tvm.nd.array(np.zeros(shape=get_const_tuple(Relu.shape), dtype=Relu.dtype), dev)
         # launch kernel 1 (depthwise_conv2d)
         f1(input_tvm, filter_tvm, depthwise_conv2d_tvm)
         # launch kernel 2 (depthwise_conv2d + relu)
         f2(input_tvm, filter_tvm, relu_tvm)
-        tvm.testing.assert_allclose(
-            depthwise_conv2d_tvm.asnumpy(), depthwise_conv2d_scipy, rtol=1e-5
-        )
-        tvm.testing.assert_allclose(relu_tvm.asnumpy(), relu_scipy, rtol=1e-5)
-
-    # test llvm only for now since depthwise_conv2d_NCHWc implement is missing in other backend.
-    for device in ["llvm"]:
-        with autotvm.tophub.context(device):  # load tophub pre-tuned parameters
-            check_device(device)
+        tvm.testing.assert_allclose(depthwise_conv2d_tvm.numpy(), depthwise_conv2d_scipy, rtol=1e-5)
+        tvm.testing.assert_allclose(relu_tvm.numpy(), relu_scipy, rtol=1e-5)
 
 
-@tvm.testing.uses_gpu
-def test_depthwise_conv2d():
+@tvm.testing.parametrize_targets
+def test_depthwise_conv2d_nchw(target, dev):
     # mobilenet workloads
-    depthwise_conv2d_with_workload_nchw(1, 32, 112, 1, 3, 1, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 64, 112, 1, 3, 2, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 128, 56, 1, 3, 1, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 128, 56, 1, 3, 2, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 256, 28, 1, 3, 1, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 256, 28, 1, 3, 2, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 512, 14, 1, 3, 1, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 512, 14, 1, 3, 2, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 1024, 7, 1, 3, 1, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 32, 112, 1, 3, 1, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 64, 112, 1, 3, 2, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 128, 56, 1, 3, 1, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 128, 56, 1, 3, 2, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 256, 28, 1, 3, 1, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 256, 28, 1, 3, 2, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 512, 14, 1, 3, 1, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 512, 14, 1, 3, 2, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 1024, 7, 1, 3, 1, "SAME")
 
-    # NCHW
-    depthwise_conv2d_with_workload_nchw(1, 728, 32, 1, 3, 1, "SAME")
-    depthwise_conv2d_with_workload_nchw(4, 256, 64, 2, 5, 2, "SAME")
-    depthwise_conv2d_with_workload_nchw(1, 728, 32, 1, 3, 1, "VALID")
-    depthwise_conv2d_with_workload_nchw(4, 256, 64, 2, 5, 2, "VALID")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 728, 32, 1, 3, 1, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 4, 256, 64, 2, 5, 2, "SAME")
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 728, 32, 1, 3, 1, "VALID")
+    depthwise_conv2d_with_workload_nchw(target, dev, 4, 256, 64, 2, 5, 2, "VALID")
     # dilation = 2
-    depthwise_conv2d_with_workload_nchw(1, 728, 64, 1, 3, 1, "SAME", dilation=2)
+    depthwise_conv2d_with_workload_nchw(target, dev, 1, 728, 64, 1, 3, 1, "SAME", dilation=2)
 
-    # NHWC
-    depthwise_conv2d_with_workload_nhwc(1, 728, 32, 1, 3, 1, "SAME")
-    depthwise_conv2d_with_workload_nhwc(4, 256, 64, 2, 5, 2, "SAME")
-    depthwise_conv2d_with_workload_nhwc(1, 728, 32, 1, 3, 1, "VALID")
-    depthwise_conv2d_with_workload_nhwc(4, 256, 64, 2, 5, 2, "VALID")
+
+@tvm.testing.parametrize_targets
+def test_depthwise_conv2d_nhwc(target, dev):
+    depthwise_conv2d_with_workload_nhwc(target, dev, 1, 728, 32, 1, 3, 1, "SAME")
+    depthwise_conv2d_with_workload_nhwc(target, dev, 4, 256, 64, 2, 5, 2, "SAME")
+    depthwise_conv2d_with_workload_nhwc(target, dev, 1, 728, 32, 1, 3, 1, "VALID")
+    depthwise_conv2d_with_workload_nhwc(target, dev, 4, 256, 64, 2, 5, 2, "VALID")
 
     # dilation = 2
     # disabled because it uses too large shared memory on cuda
-    # depthwise_conv2d_with_workload_nhwc(1, 728, 64, 1, 3, 1, "SAME", dilation=2)
+    # depthwise_conv2d_with_workload_nhwc(target, dev, 1, 728, 64, 1, 3, 1, "SAME", dilation=2)
 
+
+# test llvm only for now since depthwise_conv2d_NCHWc implement is missing in other backend.
+@tvm.testing.parametrize_targets("llvm")
+def test_depthwise_conv2d_nchwc(target, dev):
     # NCHW[x]c
-    depthwise_conv2d_with_workload_NCHWc(1, 728, 32, 1, 3, 1, "SAME", dilation=2)
-    depthwise_conv2d_with_workload_NCHWc(1, 728, 32, 1, 3, 1, "SAME")
-    depthwise_conv2d_with_workload_NCHWc(1, 728, 32, 1, 3, 1, "VALID")
+    depthwise_conv2d_with_workload_NCHWc(target, dev, 1, 728, 32, 1, 3, 1, "SAME", dilation=2)
+    depthwise_conv2d_with_workload_NCHWc(target, dev, 1, 728, 32, 1, 3, 1, "SAME")
+    depthwise_conv2d_with_workload_NCHWc(target, dev, 1, 728, 32, 1, 3, 1, "VALID")
 
-    # Test compilation on arm devices
+
+def test_depthwise_conv2d_arm():
+    # Test compilation on arm targets
     compile_depthwise_NHWC_int8_arm(1, 728, 32, 1, 3, 1, "SAME")
     compile_depthwise_NHWC_int8_arm(1, 728, 32, 1, 1, 1, "SAME", True)
 

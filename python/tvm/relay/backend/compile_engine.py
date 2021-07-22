@@ -26,12 +26,15 @@ from tvm.ir.transform import PassContext
 from tvm.runtime import Object
 from tvm.support import libinfo
 from tvm.target import Target
+from ..backend.utils import mangle_module_name
 from .. import function as _function
 from .. import ty as _ty
 from . import _backend
 
 logger = logging.getLogger("compile_engine")
 autotvm_logger = logging.getLogger("autotvm")
+
+_first_warning = True
 
 
 @tvm._ffi.register_object("relay.LoweredOutput")
@@ -244,8 +247,8 @@ def select_implementation(op, attrs, inputs, out_type, target, use_autotvm=True)
     # Use the implementation with highest plevel
     if workloads[best_plevel_impl] is not None:
         msg = (
-            "Cannot find config for target=%s, workload=%s. A fallback configuration "
-            "is used, which may bring great performance regression."
+            "Cannot find tuning records for:\n    target=%s\n    key=%s\n"
+            "TVM will apply a default schedule which may negatively impact performance."
             % (target, workloads[best_plevel_impl])
         )
         if (
@@ -253,7 +256,16 @@ def select_implementation(op, attrs, inputs, out_type, target, use_autotvm=True)
             and msg not in autotvm.task.DispatchContext.warning_messages
         ):
             autotvm.task.DispatchContext.warning_messages.add(msg)
-            autotvm_logger.warning(msg)
+            global _first_warning
+            if _first_warning:
+                _first_warning = False
+                info_msg = (
+                    "One or more operators have not been tuned. Please tune your model "
+                    "for better performance. Use DEBUG logging level to see more details."
+                )
+                autotvm_logger.warning(info_msg)
+            autotvm_logger.debug(msg)
+
     logger.info(
         "Using %s for %s based on highest priority (%s)",
         best_plevel_impl.name,
@@ -317,7 +329,7 @@ class CompileEngine(Object):
     def __init__(self):
         raise RuntimeError("Cannot construct a CompileEngine")
 
-    def lower(self, source_func, target=None):
+    def lower(self, source_func, target=None, mod_name="default"):
         """Lower a source_func to a CachedFunc.
 
         Parameters
@@ -335,8 +347,9 @@ class CompileEngine(Object):
         """
         # pylint: disable=broad-except, import-outside-toplevel
         try:
+            mod_name = mangle_module_name(mod_name)
             key = _get_cache_key(source_func, target)
-            return _backend._CompileEngineLower(self, key)
+            return _backend._CompileEngineLower(self, key, mod_name)
         except Exception:
             import traceback
 
@@ -416,7 +429,7 @@ class CompileEngine(Object):
             res += "------------------------------------\n"
             res += "target={}\n".format(k.target)
             res += "use_count={}\n".format(v.use_count)
-            res += "func_name={}\n".format(v.cached_func.func_name)
+            res += "func_name={}\n".format(v.cached_func.prim_fn_var.name_hint)
             res += "----relay function----\n"
             res += k.source_func.astext() + "\n"
             res += "----tir function----- \n"
@@ -431,7 +444,7 @@ class CompileEngine(Object):
             res += "------------------------------------\n"
             res += "target={}\n".format(k.target)
             res += "use_count={}\n".format(v.use_count)
-            res += "func_name={}\n".format(v.cached_func.func_name)
+            res += "func_name={}\n".format(v.cached_func.prim_fn_var.name_hint)
             res += "----relay function----\n"
             res += k.source_func.astext() + "\n"
             res += "----tir function----- \n"

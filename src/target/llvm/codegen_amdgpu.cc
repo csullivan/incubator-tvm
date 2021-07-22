@@ -38,15 +38,15 @@ namespace {
 
 // calls the device api to get the max threads per block
 static inline int DetectROCMmaxThreadsPerBlock() {
-  TVMContext tvm_ctx;
-  tvm_ctx.device_type = kDLROCM;
-  tvm_ctx.device_id = 0;
-  tvm::runtime::DeviceAPI* api = tvm::runtime::DeviceAPI::Get(tvm_ctx, true);
+  Device tvm_dev;
+  tvm_dev.device_type = kDLROCM;
+  tvm_dev.device_id = 0;
+  tvm::runtime::DeviceAPI* api = tvm::runtime::DeviceAPI::Get(tvm_dev, true);
   if (api != nullptr) {
     TVMRetValue val;
-    api->GetAttr(tvm_ctx, tvm::runtime::kExist, &val);
+    api->GetAttr(tvm_dev, tvm::runtime::kExist, &val);
     if (val.operator int() == 1) {
-      tvm::runtime::DeviceAPI::Get(tvm_ctx)->GetAttr(tvm_ctx, tvm::runtime::kMaxThreadsPerBlock,
+      tvm::runtime::DeviceAPI::Get(tvm_dev)->GetAttr(tvm_dev, tvm::runtime::kMaxThreadsPerBlock,
                                                      &val);
       return val.operator int();
     }
@@ -84,7 +84,8 @@ class CodeGenAMDGPU : public CodeGenLLVM {
     if (info.alignment > 16) {
       info.alignment = 16;
     }
-    if (info.scope.rank == runtime::StorageRank::kLocal) {
+    auto storage_scope = runtime::StorageScope::Create(GetPtrStorageScope(op->buffer_var));
+    if (storage_scope.rank == runtime::StorageRank::kLocal) {
       // const int local_address_space = 5;
       // TODO(tqchen): for higher version of LLVM, local address space can be set.
       llvm::AllocaInst* alloca = WithFunctionEntry([&]() {
@@ -99,7 +100,7 @@ class CodeGenAMDGPU : public CodeGenLLVM {
       }
       buf = alloca;
     } else {
-      ICHECK(info.scope.rank == runtime::StorageRank::kShared)
+      ICHECK(storage_scope.rank == runtime::StorageRank::kShared)
           << "Can only allocate shared or local memory inside kernel";
       // Shared memory: address space  == 3
       const unsigned shared_address_space = 3;
@@ -191,8 +192,7 @@ class CodeGenAMDGPU : public CodeGenLLVM {
       if (op->args[1]->dtype.is_float()) {
 #if TVM_LLVM_VERSION >= 90
 #if TVM_LLVM_VERSION >= 130
-        return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::FAdd, v0, v1,
-                                         llvm::MaybeAlign::MaybeAlign(),
+        return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::FAdd, v0, v1, llvm::MaybeAlign(),
                                          llvm::AtomicOrdering::Monotonic);
 #else
         return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::FAdd, v0, v1,
@@ -203,8 +203,7 @@ class CodeGenAMDGPU : public CodeGenLLVM {
 #endif
       }
 #if TVM_LLVM_VERSION >= 130
-      return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::Add, v0, v1,
-                                       llvm::MaybeAlign::MaybeAlign(),
+      return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::Add, v0, v1, llvm::MaybeAlign(),
                                        llvm::AtomicOrdering::Monotonic);
 #else
       return builder_->CreateAtomicRMW(llvm::AtomicRMWInst::Add, v0, v1,

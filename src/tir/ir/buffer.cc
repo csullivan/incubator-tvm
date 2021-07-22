@@ -32,6 +32,8 @@
 #include <iterator>
 #include <stack>
 
+#include "../../arith/pattern_match.h"
+
 namespace tvm {
 namespace tir {
 
@@ -45,10 +47,11 @@ Array<PrimExpr> SimplifyArray(arith::Analyzer* ana, Array<PrimExpr> array) {
   return array;
 }
 
-Buffer decl_buffer(Array<PrimExpr> shape, DataType dtype, String name, Span span) {
+Buffer decl_buffer(Array<PrimExpr> shape, DataType dtype, String name, String storage_scope,
+                   Span span) {
   DataType storage_dtype = (dtype == DataType::Bool() ? DataType::Int(8) : dtype);
-  return Buffer(Var(name, PointerType(PrimType(storage_dtype)), span), dtype, shape,
-                Array<PrimExpr>(), PrimExpr(), name, "", 0, 0, kDefault, span);
+  return Buffer(Var(name, PointerType(PrimType(storage_dtype), storage_scope), span), dtype, shape,
+                Array<PrimExpr>(), PrimExpr(), name, 0, 0, kDefault, span);
 }
 
 // Split the given expression w.r.t the add operator
@@ -311,6 +314,15 @@ Stmt Buffer::vstore(Array<PrimExpr> begin, PrimExpr value) const {
   }
 }
 
+String Buffer::scope() const {
+  const auto* ptr_type = (*this)->data->type_annotation.as<PointerTypeNode>();
+  ICHECK(ptr_type) << "Buffer variable is not of pointer type";
+  if (ptr_type->storage_scope.empty()) {
+    return "global";
+  }
+  return ptr_type->storage_scope;
+}
+
 Buffer Buffer::MakeStrideView() const {
   if ((*this)->strides.size() != 0) return *this;
   if ((*this)->shape.size() == 0) return *this;
@@ -350,7 +362,7 @@ Buffer Buffer::MakeSlice(Array<PrimExpr> begins, Array<PrimExpr> extents) const 
       return MakeStrideView().MakeSlice(begins, extents);
     }
   }
-  return Buffer(n->data, n->dtype, extents, strides, elem_offset, n->name + "_slice", n->scope,
+  return Buffer(n->data, n->dtype, extents, strides, elem_offset, n->name + "_slice",
                 n->data_alignment, 0, n->buffer_type);
 }
 
@@ -383,8 +395,8 @@ PrimExpr Buffer::access_ptr(int access_mask, DataType ptr_type, int content_lane
 }
 
 Buffer::Buffer(Var data, DataType dtype, Array<PrimExpr> shape, Array<PrimExpr> strides,
-               PrimExpr elem_offset, String name, String scope, int data_alignment,
-               int offset_factor, BufferType buffer_type, Span span) {
+               PrimExpr elem_offset, String name, int data_alignment, int offset_factor,
+               BufferType buffer_type, Span span) {
   DataType storage_dtype = dtype;
   // specially handle bool
   if (storage_dtype == DataType::Bool()) {
@@ -401,10 +413,6 @@ Buffer::Buffer(Var data, DataType dtype, Array<PrimExpr> shape, Array<PrimExpr> 
   n->shape = std::move(shape);
   n->strides = std::move(strides);
   n->name = std::move(name);
-  if (scope.length() == 0) {
-    scope = "global";
-  }
-  n->scope = std::move(scope);
   if (!elem_offset.defined()) {
     elem_offset = make_const(n->DefaultIndexType(), 0);
   }
@@ -436,11 +444,11 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 TVM_REGISTER_NODE_TYPE(BufferNode);
 
 TVM_REGISTER_GLOBAL("tir.Buffer").set_body([](TVMArgs args, TVMRetValue* ret) {
-  ICHECK_EQ(args.size(), 11);
-  auto buffer_type = args[9].operator String();
+  ICHECK_EQ(args.size(), 10);
+  auto buffer_type = args[8].operator String();
   BufferType type = (buffer_type == "auto_broadcast") ? kAutoBroadcast : kDefault;
-  *ret = Buffer(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
-                type, args[10]);
+  *ret =
+      Buffer(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], type, args[9]);
 });
 
 TVM_REGISTER_GLOBAL("tir.BufferAccessPtr").set_body_method(&Buffer::access_ptr);
@@ -448,6 +456,8 @@ TVM_REGISTER_GLOBAL("tir.BufferAccessPtr").set_body_method(&Buffer::access_ptr);
 TVM_REGISTER_GLOBAL("tir.BufferVLoad").set_body_method(&Buffer::vload);
 
 TVM_REGISTER_GLOBAL("tir.BufferVStore").set_body_method(&Buffer::vstore);
+
+TVM_REGISTER_GLOBAL("tir.BufferStorageScope").set_body_method(&Buffer::scope);
 
 }  // namespace tir
 }  // namespace tvm

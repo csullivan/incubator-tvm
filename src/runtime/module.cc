@@ -113,7 +113,10 @@ const PackedFunc* ModuleNode::GetFuncFromEnv(const std::string& name) {
   if (pf == nullptr) {
     const PackedFunc* f = Registry::Get(name);
     ICHECK(f != nullptr) << "Cannot find function " << name
-                         << " in the imported modules or global registry";
+                         << " in the imported modules or global registry."
+                         << " If this involves ops from a contrib library like"
+                         << " cuDNN, ensure TVM was built with the relevant"
+                         << " library.";
     return f;
   } else {
     import_cache_.insert(std::make_pair(name, std::make_shared<PackedFunc>(pf)));
@@ -126,7 +129,7 @@ bool RuntimeEnabled(const std::string& target) {
   if (target == "cpu") {
     return true;
   } else if (target == "cuda" || target == "gpu") {
-    f_name = "device_api.gpu";
+    f_name = "device_api.cuda";
   } else if (target == "cl" || target == "opencl" || target == "sdaccel") {
     f_name = "device_api.opencl";
   } else if (target == "mtl" || target == "metal") {
@@ -139,8 +142,6 @@ bool RuntimeEnabled(const std::string& target) {
     f_name = "target.build.stackvm";
   } else if (target == "rpc") {
     f_name = "device_api.rpc";
-  } else if (target == "micro_dev") {
-    f_name = "device_api.micro_dev";
   } else if (target == "hexagon") {
     f_name = "device_api.hexagon";
   } else if (target.length() >= 5 && target.substr(0, 5) == "nvptx") {
